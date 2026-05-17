@@ -2,7 +2,7 @@
 AI Bridge Configuration
 ─────────────────────────────────────────
 Semua konfigurasi diambil dari environment variables.
-Di production: dari docker-compose environment atau .env file.
+Di production: dari docker-compose env_file atau .env file di server.
 """
 
 from pydantic_settings import BaseSettings
@@ -12,10 +12,10 @@ from functools import lru_cache
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # ── Openclaw AI ──────────────────────────────────────────
-    openclaw_base_url: str = "http://127.0.0.1:8080/v1"
-    openclaw_api_key: str = "openclaw-key"
-    openclaw_model: str = "glm-4.7-flash"
+    # ── LLM / AI Provider (OpenAI-compatible) ────────────────
+    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_api_key: str = "your-api-key-here"
+    llm_model: str = "qwen/qwen3-32b"
 
     # ── Database ─────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://bcs_admin:sangatrahasia@localhost:5433/mybcs_db"

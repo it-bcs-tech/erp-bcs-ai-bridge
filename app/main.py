@@ -2,7 +2,7 @@
 AI Bridge — FastAPI Entry Point
 ─────────────────────────────────────────
 Service ini menjadi jembatan antara:
-  Frontend (SvelteKit) ↔ AI (Openclaw) ↔ Database (PostgreSQL)
+  Frontend (SvelteKit) ↔ AI LLM (Groq/OpenAI-compatible) ↔ Database (PostgreSQL)
 
 Jalankan:
   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -24,8 +24,8 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────
     print("=" * 50)
     print("🚀 AI Bridge Starting...")
-    print(f"   Model    : {settings.openclaw_model}")
-    print(f"   Openclaw : {settings.openclaw_base_url}")
+    print(f"   Model    : {settings.llm_model}")
+    print(f"   LLM URL  : {settings.llm_base_url}")
     print(f"   Database : {settings.database_url.split('@')[1] if '@' in settings.database_url else 'configured'}")
     print("=" * 50)
 
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Bridge — ERP BCS",
-    description="Jembatan AI antara Frontend SvelteKit dan Openclaw LLM dengan akses langsung ke PostgreSQL.",
+    description="Jembatan AI antara Frontend SvelteKit dan LLM Provider (OpenAI-compatible) dengan akses langsung ke PostgreSQL.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -71,6 +71,6 @@ async def root():
         "service": "AI Bridge — ERP BCS",
         "version": "1.0.0",
         "status": "running",
-        "model": settings.openclaw_model,
+        "model": settings.llm_model,
         "docs": "/docs",
     }

@@ -26,7 +26,7 @@ from app.tools.presensi import (
     get_leave_today,
     get_present_today,
 )
-from app.llm.openclaw_client import client, settings
+from app.llm.llm_client import client, settings
 from typing import AsyncGenerator
 
 
@@ -179,7 +179,7 @@ async def process_chat(messages: list[dict], db: AsyncSession) -> AsyncGenerator
     # 2. Panggil LLM
     try:
         response = await client.chat.completions.create(
-            model=settings.openclaw_model,
+            model=settings.llm_model,
             messages=conversation,
             tools=HRIS_TOOLS,
             tool_choice="auto",
@@ -250,7 +250,7 @@ async def process_chat(messages: list[dict], db: AsyncSession) -> AsyncGenerator
     if has_tool_call:
         # 4. Stream jawaban final setelah mendapat data
         stream = await client.chat.completions.create(
-            model=settings.openclaw_model,
+            model=settings.llm_model,
             messages=conversation,
             temperature=0.7,
             stream=True,
