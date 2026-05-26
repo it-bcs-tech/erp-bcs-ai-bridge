@@ -14,6 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.routers.chat import router as chat_router
+from app.routers.fms_chat import router as fms_chat_router
+from app.routers.anomaly import router as anomaly_router
+from app.routers.dispatch import router as dispatch_router
+from app.routers.maintenance import router as maintenance_router
+from app.routers.scoring import router as scoring_router
 
 settings = get_settings()
 
@@ -61,7 +66,12 @@ app.add_middleware(
 )
 
 # ── Register Routers ────────────────────────────────────────
-app.include_router(chat_router, tags=["Chat"])
+app.include_router(chat_router, tags=["HRIS Chat"])
+app.include_router(fms_chat_router, prefix="/fms", tags=["FMS Chat"])
+app.include_router(anomaly_router, prefix="/fms", tags=["FMS Intelligence"])
+app.include_router(dispatch_router, prefix="/fms", tags=["FMS Dispatch Intelligence"])
+app.include_router(maintenance_router, prefix="/fms", tags=["FMS Maintenance Intelligence"])
+app.include_router(scoring_router, prefix="/fms", tags=["FMS Driver Scoring"])
 
 
 # ── Root Endpoint ────────────────────────────────────────────
