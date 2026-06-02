@@ -19,10 +19,13 @@ Struktur data EasyGo yang relevan:
 """
 
 import httpx
+import os
 from datetime import datetime
 
 # ── Konfigurasi Go-Map Backend ────────────────────────────────────
-GO_MAP_URL = "http://localhost:8081/api/fms/live-map"
+# Di Docker: erp_go_map (nama service) | Di lokal: localhost:8081
+# Set GO_MAP_URL di .env untuk override
+GO_MAP_URL = os.environ.get("GO_MAP_URL", "http://erp_go_map:8081/api/fms/live-map")
 HTTP_TIMEOUT = 10.0  # seconds
 
 
