@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # ── Database ─────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://bcs_admin:sangatrahasia@localhost:5433/mybcs_db"
 
+    # ── FMS / Go-Map Backend ──────────────────────────────────
+    # Di Docker: http://erp_go_map:8081 | Di lokal: http://localhost:8081
+    go_map_url: str = "http://erp_go_map:8081/api/fms/live-map"
+
     # ── Service ──────────────────────────────────────────────
     ai_bridge_host: str = "0.0.0.0"
     ai_bridge_port: int = 8000
