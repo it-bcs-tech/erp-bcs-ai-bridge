@@ -19,6 +19,7 @@ from app.routers.anomaly import router as anomaly_router
 from app.routers.dispatch import router as dispatch_router
 from app.routers.maintenance import router as maintenance_router
 from app.routers.scoring import router as scoring_router
+from app.routers.trip_summary import router as trip_summary_router
 
 settings = get_settings()
 
@@ -72,6 +73,7 @@ app.include_router(anomaly_router, prefix="/fms", tags=["FMS Intelligence"])
 app.include_router(dispatch_router, prefix="/fms", tags=["FMS Dispatch Intelligence"])
 app.include_router(maintenance_router, prefix="/fms", tags=["FMS Maintenance Intelligence"])
 app.include_router(scoring_router, prefix="/fms", tags=["FMS Driver Scoring"])
+app.include_router(trip_summary_router, prefix="/fms", tags=["FMS Trip Summary"])
 
 
 # ── Root Endpoint ────────────────────────────────────────────
