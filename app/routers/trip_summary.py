@@ -57,18 +57,23 @@ Struktur JSON yang WAJIB digunakan:
             model=settings.llm_model,
             messages=[{"role": "system", "content": "You output strictly valid JSON."}, {"role": "user", "content": prompt}],
             temperature=0.6,
+            max_tokens=4000
         )
         content = response.choices[0].message.content
         
-        # Bersihkan <think> tags jika menggunakan deepseek
+        # Bersihkan <think> tags jika ada
         clean_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         
-        # Pastikan format JSON terekstrak walau ada markdown
-        if "```json" in clean_content:
-            clean_content = clean_content.split("```json")[1].split("```")[0].strip()
-        elif "```" in clean_content:
-            clean_content = clean_content.split("```")[1].split("```")[0].strip()
+        # Ekstrak data murni menggunakan Regex (hanya mengambil dari { sampai })
+        json_match = re.search(r'\{.*\}', clean_content, re.DOTALL)
+        if json_match:
+            clean_content = json_match.group(0)
 
-        return json.loads(clean_content)
+        try:
+            return json.loads(clean_content)
+        except json.JSONDecodeError as e:
+            # Jika masih gagal, lemparkan error yang lebih spesifik (bukan 500 misterius)
+            raise HTTPException(status_code=500, detail=f"Gagal memparsing respons JSON dari AI: {clean_content} (Error: {str(e)})")
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
