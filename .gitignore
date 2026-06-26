@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# Temporary/Test scripts
+inspect_fms_db.py
+test_chart.py

@@ -206,3 +206,73 @@ async def get_present_today(db: AsyncSession, location: Optional[str] = None) ->
     except Exception as e:
         logger.error(f"get_present_today error: {e}")
         return f"INFO DATABASE: Terjadi kesalahan database saat mengambil data kehadiran: {str(e)}"
+
+# ── Tool 6: Rekap cuti/sakit/izin bulanan ────────────────────────
+async def get_absent_monthly(db: AsyncSession, month: Optional[int] = None, year: Optional[int] = None, reason: Optional[str] = None) -> str:
+    """Ambil daftar karyawan beserta rincian jumlah hari mereka mengambil cuti, absen, sakit, atau izin secara kumulatif pada bulan tertentu."""
+    m = month or datetime.now().month
+    y = year or datetime.now().year
+    reason_lower = reason.lower() if reason else ""
+
+    if reason_lower == "cuti":
+        filter_sql = "AND type NOT ILIKE '%Sakit%'"
+        target_tables = ["leaves"]
+    elif reason_lower == "sakit":
+        filter_sql = "AND type ILIKE '%Sakit%'"
+        target_tables = ["leaves"]
+    elif reason_lower == "izin":
+        filter_sql = ""
+        target_tables = ["permission_requests"]
+    else:
+        filter_sql = ""
+        target_tables = ["leaves", "permission_requests"]
+        
+    union_queries = []
+    
+    if "leaves" in target_tables:
+        q = f"""
+            SELECT COALESCE(mk.nama_karyawan, mp.name, 'Karyawan (ID: ' || l.user_id || ')') as name, 
+                   COUNT(l.id) as total_days, 
+                   'Cuti/Sakit' as category
+            FROM presensi.leaves l
+            LEFT JOIN master.m_presensi mp ON l.user_id = mp.id
+            LEFT JOIN master.m_karyawan mk ON mp.karyawan_id = mk.id
+            WHERE EXTRACT(MONTH FROM l.start_date) = {m} AND EXTRACT(YEAR FROM l.start_date) = {y} 
+            AND l.status = 'approved' {filter_sql if "leaves" in target_tables else ""}
+            GROUP BY 1
+        """
+        union_queries.append(q)
+        
+    if "permission_requests" in target_tables:
+        q = f"""
+            SELECT COALESCE(mk.nama_karyawan, mp.name, 'Karyawan (ID: ' || p.user_id || ')') as name, 
+                   COUNT(p.id) as total_days, 
+                   'Izin' as category
+            FROM presensi.permission_requests p
+            LEFT JOIN master.m_presensi mp ON p.user_id = mp.id
+            LEFT JOIN master.m_karyawan mk ON mp.karyawan_id = mk.id
+            WHERE EXTRACT(MONTH FROM p.start_date) = {m} AND EXTRACT(YEAR FROM p.start_date) = {y} 
+            AND p.status = 'approved'
+            GROUP BY 1
+        """
+        union_queries.append(q)
+
+    query = " UNION ALL ".join(union_queries)
+    
+    try:
+        result = await db.execute(text(query))
+        rows = result.fetchall()
+        
+        reason_str = reason or "tidak hadir (izin/sakit/cuti)"
+        
+        if not rows:
+            return f"INFO DATABASE: Tidak ada data karyawan yang {reason_str} pada bulan {m} tahun {y}."
+            
+        lines = [f"Rekapitulasi karyawan yang {reason_str} pada bulan {m}-{y}:"]
+        for r in rows:
+            lines.append(f"- {r.name}: {r.total_days} kali pengajuan ({r.category})")
+            
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"get_absent_monthly error: {e}")
+        return f"INFO DATABASE: Terjadi kesalahan saat membaca rekap cuti bulanan: {str(e)}"

@@ -21,6 +21,8 @@ Struktur data EasyGo yang relevan:
 import httpx
 from datetime import datetime
 from app.config import get_settings
+from app.database import async_session
+from sqlalchemy import text
 
 settings = get_settings()
 
@@ -47,6 +49,30 @@ async def _fetch_fleet_data() -> tuple[list[dict], str | None]:
             records = data.get("records", [])
             if not records:
                 return [], "Data GPS kosong — go-map mengembalikan 0 unit."
+                
+            # Inject nama driver dari database jika kosong
+            try:
+                async with async_session() as db:
+                    q = """
+                        SELECT u.no_unit, COALESCE(t.driver_nama, mk.nama_karyawan) as driver
+                        FROM master.m_unit u
+                        JOIN fleet.trip t ON u.id = t.unit_id
+                        LEFT JOIN master.m_drivers md ON t.driver_id = md.id
+                        LEFT JOIN master.m_karyawan mk ON md.karyawan_id = mk.id
+                        WHERE t.status NOT IN ('COMPLETED', 'CANCELED')
+                    """
+                    res = await db.execute(text(q))
+                    active_drivers = {row[0].replace(' ', '').upper(): row[1] for row in res.fetchall() if row[1]}
+                    
+                    for r in records:
+                        raw_driver = (r.get("driver_nm") or "").strip()
+                        if not raw_driver or raw_driver == "-":
+                            nopol = (r.get("nopol") or "").replace(' ', '').upper()
+                            if nopol in active_drivers:
+                                r["driver_nm"] = active_drivers[nopol]
+            except Exception as e:
+                pass  # Fallback to pure GPS data if DB injection fails
+                
             return records, None
     except httpx.ConnectError:
         return [], f"Tidak dapat terhubung ke go-map backend ({GO_MAP_URL}). Pastikan server Go berjalan."
@@ -321,3 +347,71 @@ async def get_fleet_summary_for_monitoring() -> str:
         lines.append("\n✅ Tidak ada unit yang terdeteksi terjebak kemacetan.")
 
     return "\n".join(lines)
+
+
+async def get_driver_trip_stats(driver_name: str = "") -> str:
+    """
+    Mengambil data riwayat penyelesaian trip seorang driver secara harian, mingguan, bulanan, dan tahunan.
+    Mencakup semua status perjalanan (COMPLETED, aktif, dll).
+    Jika driver_name kosong, mengembalikan perbandingan top driver (leaderboard).
+    """
+    async with async_session() as db:
+        if not driver_name or driver_name.strip() in ("", "-", "Unknown"):
+            query = """
+                SELECT 
+                    COALESCE(t.driver_nama, mk.nama_karyawan) as driver,
+                    COUNT(CASE WHEN t.status = 'COMPLETED' THEN 1 END) as total_selesai,
+                    COUNT(CASE WHEN t.status != 'COMPLETED' AND t.status != 'CANCELED' THEN 1 END) as total_aktif
+                FROM fleet.trip t
+                LEFT JOIN master.m_drivers md ON t.driver_id = md.id
+                LEFT JOIN master.m_karyawan mk ON md.karyawan_id = mk.id
+                GROUP BY COALESCE(t.driver_nama, mk.nama_karyawan)
+                HAVING COUNT(t.id) > 0
+                ORDER BY total_selesai DESC
+                LIMIT 20
+            """
+            try:
+                result = await db.execute(text(query))
+                rows = result.fetchall()
+                if not rows:
+                    return "INFO DATABASE: Belum ada data perjalanan (trip) yang terekam di sistem."
+                
+                lines = ["Statistik Perbandingan Trip Antar Driver (Top 20):"]
+                for r in rows:
+                    driver_val = r.driver or "Tanpa Nama"
+                    lines.append(f"- Driver '{driver_val}': {r.total_selesai} selesai, {r.total_aktif} aktif")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"INFO DATABASE: Terjadi kesalahan saat mengambil perbandingan trip: {str(e)}"
+                
+        # Jika driver_name spesifik diberikan:
+        query = """
+            SELECT 
+                COUNT(CASE WHEN DATE(t.tgl_trip) = CURRENT_DATE THEN 1 END) as harian,
+                COUNT(CASE WHEN t.tgl_trip >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as mingguan,
+                COUNT(CASE WHEN EXTRACT(MONTH FROM t.tgl_trip) = EXTRACT(MONTH FROM CURRENT_DATE) AND EXTRACT(YEAR FROM t.tgl_trip) = EXTRACT(YEAR FROM CURRENT_DATE) THEN 1 END) as bulanan,
+                COUNT(CASE WHEN EXTRACT(YEAR FROM t.tgl_trip) = EXTRACT(YEAR FROM CURRENT_DATE) THEN 1 END) as tahunan,
+                COUNT(CASE WHEN t.status = 'COMPLETED' THEN 1 END) as total_selesai,
+                COUNT(CASE WHEN t.status != 'COMPLETED' AND t.status != 'CANCELED' THEN 1 END) as total_aktif
+            FROM fleet.trip t
+            LEFT JOIN master.m_drivers md ON t.driver_id = md.id
+            LEFT JOIN master.m_karyawan mk ON md.karyawan_id = mk.id
+            WHERE COALESCE(t.driver_nama, mk.nama_karyawan) ILIKE :driver_name
+        """
+        try:
+            result = await db.execute(text(query), {"driver_name": f"%{driver_name}%"})
+            row = result.fetchone()
+            if not row or (row.harian == 0 and row.mingguan == 0 and row.bulanan == 0 and row.tahunan == 0):
+                return f"INFO DATABASE: Tidak ditemukan riwayat trip apapun untuk driver yang mengandung nama '{driver_name}'."
+                
+            return (
+                f"Statistik Seluruh Trip (Aktif & Selesai) untuk Driver '{driver_name}':\n"
+                f"- Harian (Hari ini): {row.harian} trip\n"
+                f"- Mingguan (7 hari terakhir): {row.mingguan} trip\n"
+                f"- Bulanan (Bulan ini): {row.bulanan} trip\n"
+                f"- Tahunan (Tahun ini): {row.tahunan} trip\n"
+                f"- Total Trip Selesai: {row.total_selesai}\n"
+                f"- Total Trip Sedang Aktif: {row.total_aktif}\n"
+            )
+        except Exception as e:
+            return f"INFO DATABASE: Terjadi kesalahan saat mengambil data trip: {str(e)}"

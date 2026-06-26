@@ -22,12 +22,15 @@ from app.tools.fms_tools import (
     get_slow_or_stuck_units,
     get_units_by_status,
     get_fleet_summary_for_monitoring,
+    get_driver_trip_stats,
 )
+from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
 
 
 # ── 1. Definisi Tools untuk LLM ──────────────────────────────────
 
 FMS_TOOLS = [
+    CHART_TOOL_SCHEMA,
     {
         "type": "function",
         "function": {
@@ -107,6 +110,28 @@ FMS_TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_driver_trip_stats",
+            "description": (
+                "Hasilkan statistik riwayat penyelesaian trip (perjalanan) seorang driver. "
+                "Memberikan data jumlah trip yang diselesaikan secara harian, mingguan, bulanan, dan tahunan. "
+                "JIKA Anda ingin melakukan perbandingan ('compare') atau melihat papan peringkat ('leaderboard') "
+                "seluruh pengemudi, kosongkan parameter driver_name. "
+                "Gunakan untuk pertanyaan: 'berapa trip driver Budi?', 'bandingkan kinerja driver', 'siapa driver terbaik'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "driver_name": {
+                        "type": "string",
+                        "description": "Nama pengemudi (driver) yang dicari. Kosongkan (string kosong) jika ingin membandingkan seluruh driver.",
+                    }
+                }
+            },
+        },
+    },
 ]
 
 
@@ -123,14 +148,14 @@ Tugas Anda adalah membantu tim operasional FMS (Fleet Management System) untuk:
 
 ## Aturan Penting:
 1. Anda DILENGKAPI dengan tools GPS real-time. WAJIB panggil tools jika data dibutuhkan.
-2. JANGAN PERNAH mengarang data, nopol, nama driver, atau koordinat.
+2. JANGAN PERNAH mengarang data palsu. NAMUN, JANGAN PERNAH MENOLAK menampilkan daftar unit hanya karena nama driver kosong/strip (-). Jika user meminta daftar unit dan driver, Anda WAJIB langsung menuliskannya secara rinci (contoh: "- B 1234 XX | Driver: -").
 3. Data GPS diperbarui setiap 30 detik — selalu informasikan ini kepada user jika relevan.
 4. Jawab dalam Bahasa Indonesia yang profesional, singkat, dan to-the-point. Gunakan emoji.
-5. 🛡️ PEMBATASAN TOPIK: Anda HANYA menjawab pertanyaan seputar armada, GPS, monitoring unit, \
-logistik, dan pengiriman BCS. JIKA ditanya di luar topik, tolak dengan sopan: \
-"Maaf, saya FARIDA — asisten monitoring armada. Saya hanya bisa membantu urusan fleet dan GPS."
+5. 🛡️ PEMBATASAN TOPIK: Anda HANYA menjawab pertanyaan seputar armada, GPS, monitoring unit, logistik, dan pengiriman BCS. JIKA ditanya di luar topik, tolak dengan sopan: "Maaf, saya FARIDA — asisten monitoring armada. Saya hanya bisa membantu urusan fleet dan GPS."
 6. Untuk deteksi kemacetan: kecepatan < 5 km/h saat status Moving = MACET. \
 5–20 km/h = LALU LINTAS PADAT. Sampaikan koordinat GPS untuk referensi tim lapangan.
+7. 📊 VISUALISASI GRAFIK: Jika pengguna meminta grafik atau visualisasi, panggil tool `generate_chart_image`.
+**ATURAN MUTLAK GRAFIK:** Grafik akan DICETAK SECARA OTOMATIS oleh sistem ke layar pengguna. Oleh karena itu, di jawaban akhir Anda, Anda DILARANG KERAS mencetak atau membuat markdown gambar (seperti `![grafik](...)`) atau URL tautan apa pun! Tugas Anda HANYA memberikan penjelasan/analisis teks singkat dari data grafik tersebut!
 """
 
 
@@ -155,10 +180,14 @@ async def _execute_fms_tool(tool_call) -> str:
             return await get_units_by_status(status=args.get("status", "moving"))
         elif func_name == "get_fleet_summary_for_monitoring":
             return await get_fleet_summary_for_monitoring()
+        elif func_name == "get_driver_trip_stats":
+            return await get_driver_trip_stats(driver_name=args.get("driver_name"))
+        elif func_name == "generate_chart_image":
+            return await generate_chart_image(**args)
         else:
             return f"Error: Tool '{func_name}' tidak dikenali oleh FARIDA."
     except Exception as e:
-        return f"ERROR saat mengambil data GPS: {str(e)}"
+        return f"ERROR saat mengambil data: {str(e)}"
 
 
 # ── 4. Streaming Filter (hapus tag <think>) ───────────────────────
@@ -215,75 +244,120 @@ async def process_fms_chat(
 
     conversation = [{"role": "system", "content": dynamic_prompt}] + messages
 
-    # ── Langkah 1: Panggil LLM (dengan tools) ────────────────
-    try:
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=conversation,
-            tools=FMS_TOOLS,
-            tool_choice="auto",
-            temperature=0.1,
-        )
-        response_message = response.choices[0].message
-    except Exception as e:
-        error_msg = str(e)
-        yield f"⚠️ FARIDA gagal memproses permintaan: {error_msg}"
-        return
-
+    # ── Langkah 1: Loop Pemanggilan LLM (Maksimal 3 Putaran Tool) ─────────
+    max_tool_turns = 3
+    turn = 0
     has_tool_call = False
 
-    # ── Langkah 2a: Native tool_calls ────────────────────────
-    if response_message.tool_calls:
-        has_tool_call = True
-        conversation.append(response_message)
+    while turn < max_tool_turns:
+        turn += 1
+        try:
+            response = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=conversation,
+                tools=FMS_TOOLS,
+                tool_choice="auto",
+                temperature=0.1,
+            )
+            response_message = response.choices[0].message
+        except Exception as e:
+            error_msg = str(e)
+            yield f"⚠️ FARIDA gagal memproses permintaan: {error_msg}"
+            return
 
-        for tool_call in response_message.tool_calls:
-            print(f"[FARIDA] Tool dipanggil: {tool_call.function.name} | args: {tool_call.function.arguments}")
-            result = await _execute_fms_tool(tool_call)
-            conversation.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "name": tool_call.function.name,
-                "content": str(result),
-            })
+        current_turn_has_tool = False
 
-    # ── Langkah 2b: Groq bocor <function=...> ────────────────
-    elif response_message.content and "<function=" in response_message.content:
-        has_tool_call = True
-        content = response_message.content
-        conversation.append({"role": "assistant", "content": content})
+        # ── Cek Native Tool Calls ────────────────────────
+        if response_message.tool_calls:
+            current_turn_has_tool = True
+            has_tool_call = True
+            conversation.append(response_message)
 
-        for match in re.finditer(r"<function=([^>]+)>(.*?)</function>", content):
-            func_name = match.group(1).strip()
-            args_str = match.group(2).strip()
-            print(f"[FARIDA] Groq parser: {func_name} | args: {args_str}")
+            for tool_call in response_message.tool_calls:
+                print(f"[FARIDA] Tool dipanggil (Putaran {turn}): {tool_call.function.name} | args: {tool_call.function.arguments}")
+                result = await _execute_fms_tool(tool_call)
+                
+                if tool_call.function.name == "generate_chart_image":
+                    yield str(result) + "\n\n"
+                    tool_content = "GRAFIK BERHASIL DITAMPILKAN SECARA OTOMATIS OLEH SISTEM. Tolong berikan analisis singkat dari grafik ini tanpa membuat link url apa pun lagi."
+                else:
+                    tool_content = str(result)
 
-            class _MockFn:
-                name = func_name
-                arguments = args_str if args_str.startswith("{") else f'{{"nopol": "{args_str}"}}'
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": tool_content,
+                })
 
-            class _MockCall:
-                id = f"call_{func_name}"
-                function = _MockFn()
+        # ── Cek Groq Fallback (<function=...> atau <tool_call>) ────────────────
+        elif response_message.content and ("<function=" in response_message.content or "<tool_call>" in response_message.content or '{"name":' in response_message.content):
+            current_turn_has_tool = True
+            has_tool_call = True
+            content = response_message.content
+            conversation.append({"role": "assistant", "content": content})
 
-            result = await _execute_fms_tool(_MockCall())
-            conversation.append({
-                "role": "user",
-                "content": f"[System: Hasil dari {func_name}]:\n{result}",
-            })
+            # Coba tangkap JSON mentah jika menggunakan <tool_call> atau raw JSON
+            raw_json_match = re.search(r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}', content, re.DOTALL)
+            
+            if raw_json_match:
+                func_name = raw_json_match.group(1).strip()
+                args_str = raw_json_match.group(2).strip()
+                print(f"[FARIDA] Groq JSON parser (Putaran {turn}): {func_name} | args: {args_str}")
+            else:
+                # Fallback ke regex <function=name>args</function>
+                match = re.search(r"<function=([^>]+)>(.*?)</function>", content)
+                if match:
+                    func_name = match.group(1).strip()
+                    args_str = match.group(2).strip()
+                    print(f"[FARIDA] Groq function parser (Putaran {turn}): {func_name} | args: {args_str}")
+                else:
+                    func_name = None
+                    args_str = "{}"
+            
+            if func_name:
+                class _MockFn:
+                    name = func_name
+                    arguments = args_str if args_str.startswith("{") else f'{{"nopol": "{args_str}"}}'
 
-    # ── Langkah 3: Stream jawaban final ──────────────────────
+                class _MockCall:
+                    id = f"call_{func_name}"
+                    function = _MockFn()
+
+                result = await _execute_fms_tool(_MockCall())
+                print(f"[FARIDA] Hasil eksekusi fallback: {result[:50]}...")
+                
+                if func_name == "generate_chart_image":
+                    yield str(result) + "\n\n"
+                    tool_content = "GRAFIK BERHASIL DITAMPILKAN SECARA OTOMATIS OLEH SISTEM. Tolong berikan analisis singkat dari grafik ini tanpa membuat link url apa pun lagi."
+                else:
+                    tool_content = str(result)
+
+                conversation.append({
+                    "role": "user",
+                    "content": f"[System: Hasil dari {func_name}]:\n{tool_content}",
+                })
+
+        # Jika di putaran ini tidak ada pemanggilan tool lagi, keluar dari loop LLM
+        if not current_turn_has_tool:
+            # Karena ini bukan tool call, ini bisa jadi jawaban final statis.
+            break
+
+    # ── Langkah 2: Stream jawaban final ──────────────────────
     if has_tool_call:
-        stream = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=conversation,
-            temperature=0.7,
-            stream=True,
-        )
-        async for chunk in _stream_filtered(stream):
-            yield chunk
+        try:
+            stream = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=conversation,
+                temperature=0.7,
+                stream=True,
+            )
+            async for chunk in _stream_filtered(stream):
+                yield chunk
+        except Exception as e:
+            yield f"\n⚠️ [Stream Error]: {str(e)}"
     else:
-        # Tidak ada tool call — filter think tag dari respons statis
+        # Tidak ada tool call sama sekali sejak putaran pertama
         if response_message.content:
             clean = re.sub(r"<think>.*?</think>", "", response_message.content, flags=re.DOTALL).strip()
             yield clean

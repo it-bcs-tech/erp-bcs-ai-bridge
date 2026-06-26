@@ -11,10 +11,13 @@ Jalankan:
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
 
 from app.config import get_settings
 from app.routers.chat import router as chat_router
 from app.routers.fms_chat import router as fms_chat_router
+from app.routers.ocs_chat import router as ocs_chat_router
 from app.routers.anomaly import router as anomaly_router
 from app.routers.dispatch import router as dispatch_router
 from app.routers.maintenance import router as maintenance_router
@@ -66,8 +69,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Mount Static Files ──────────────────────────────────────
+os.makedirs("app/static/charts", exist_ok=True)
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
 # ── Register Routers ────────────────────────────────────────
 app.include_router(chat_router, tags=["HRIS Chat"])
+app.include_router(ocs_chat_router, prefix="/ocs", tags=["OCS Chat"])
 app.include_router(fms_chat_router, prefix="/fms", tags=["FMS Chat"])
 app.include_router(anomaly_router, prefix="/fms", tags=["FMS Intelligence"])
 app.include_router(dispatch_router, prefix="/fms", tags=["FMS Dispatch Intelligence"])

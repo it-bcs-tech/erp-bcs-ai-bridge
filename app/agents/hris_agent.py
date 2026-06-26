@@ -25,14 +25,17 @@ from app.tools.presensi import (
     get_attendance_monthly,
     get_leave_today,
     get_present_today,
+    get_absent_monthly,
 )
 from app.llm.llm_client import client, settings
+from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
 from typing import AsyncGenerator
 
 
 # ── 1. Definisi Tools untuk LLM ──────────────────────────────────
 
 HRIS_TOOLS = [
+    CHART_TOOL_SCHEMA,
     {
         "type": "function",
         "function": {
@@ -112,6 +115,21 @@ HRIS_TOOLS = [
                 }
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_absent_monthly",
+            "description": "Ambil rekap kumulatif daftar karyawan yang tidak hadir (cuti, sakit, izin) pada bulan tertentu beserta detail berapa kali pengajuannya.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "month": {"type": "integer", "description": "Angka bulan (1-12)."},
+                    "year": {"type": "integer", "description": "Angka tahun (contoh: 2026)."},
+                    "reason": {"type": "string", "enum": ["izin", "sakit", "cuti", "semua"], "description": "Filter alasan ketidakhadiran kumulatif."}
+                }
+            }
+        }
     }
 ]
 
@@ -126,7 +144,10 @@ Tugas Anda adalah membantu tim HR mencari dan menganalisis data karyawan & absen
 2. JANGAN PERNAH mengarang angka, nama, atau hasil analisis.
 3. Jawab dalam Bahasa Indonesia yang profesional dan ramah. Gunakan emoji.
 4. Anda bisa melakukan analisis, merangkum, dan membandingkan data yang dikembalikan oleh tool.
-5. 🛡️ PEMBATASAN TOPIK: Anda HANYA diizinkan menjawab pertanyaan seputar HRIS, data karyawan, absensi, perusahaan PT BCS Logistics, dan Undang-Undang Ketenagakerjaan (hukum tenaga kerja, hak pekerja, dsb). JIKA user bertanya di luar topik tersebut (misal: olahraga, politik, resep masakan), TOLAK DENGAN SOPAN. Contoh penolakan: "Maaf, saya adalah asisten HARIS. Saya hanya diprogram untuk membantu urusan HRIS dan Ketenagakerjaan."
+5. 🛡️ PEMBATASAN TOPIK SANGAT KETAT: Anda HANYA diizinkan menjawab pertanyaan seputar HRIS, data karyawan, absensi, perusahaan PT BCS Logistics, dan Undang-Undang Ketenagakerjaan. JIKA pengguna bertanya di luar topik tersebut (misalnya matematika dasar, coding, cuaca, politik, resep masakan, armada, FMS, atau modul lain), Anda HARUS MUTLAK MENOLAK DENGAN SOPAN. 
+Contoh penolakan: "Maaf, saya adalah HARIS (Asisten HRIS). Saya hanya diprogram untuk membantu urusan kepegawaian dan HR. Saya tidak dapat menjawab pertanyaan tersebut."
+6. 📊 VISUALISASI GRAFIK: Jika pengguna meminta grafik, bagan (bar, pie, line), atau diagram visual, panggil tool `generate_chart_image` dengan data yang Anda miliki. 
+**ATURAN MUTLAK GRAFIK:** Grafik akan DICETAK SECARA OTOMATIS oleh sistem ke layar pengguna. Oleh karena itu, di jawaban akhir Anda, Anda DILARANG KERAS mencetak atau membuat markdown gambar (seperti `![grafik](...)`) atau URL tautan apa pun! Tugas Anda HANYA memberikan penjelasan/analisis teks singkat dari data grafik tersebut!
 """
 
 
@@ -147,6 +168,8 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
             return await get_attendance_today(db, location=args.get("location"))
         elif func_name == "get_absent_today":
             return await get_absent_today(db, reason=args.get("reason"), location=args.get("location"))
+        elif func_name == "generate_chart_image":
+            return await generate_chart_image(**args)
         elif func_name == "get_attendance_monthly":
             return await get_attendance_monthly(db, month=args.get("month"), year=args.get("year"), employee_id=args.get("employee_id"))
         elif func_name == "get_employee_count":
@@ -157,6 +180,8 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
             return await get_leave_today(db)
         elif func_name == "get_present_today":
             return await get_present_today(db, location=args.get("location"))
+        elif func_name == "get_absent_monthly":
+            return await get_absent_monthly(db, month=args.get("month"), year=args.get("year"), reason=args.get("reason"))
         else:
             return f"Error: Tool '{func_name}' tidak ditemukan."
     except Exception as e:
@@ -189,73 +214,111 @@ async def process_chat(messages: list[dict], db: AsyncSession) -> AsyncGenerator
     except Exception as e:
         # Jika Groq API throw 400 Tool Use Failed
         error_msg = str(e)
-        import re
-        failed_tool = re.search(r"failed_generation':\s*'([^']+)'", error_msg)
-        if failed_tool:
-            func_str = failed_tool.group(1)
-            # Fallback jika model gagal pakai format Groq yang benar, paksa ambil data total hari ini
-            tool_result = await execute_tool(type('obj', (object,), {'function': type('obj2', (object,), {'name': 'get_attendance_today', 'arguments': '{}'})})(), db)
-            yield f"⚠️ (Menggunakan Fallback Engine karena AI salah ketik format)\n\n{tool_result}"
-            return
-        else:
-            yield f"⚠️ AI gagal memproses data: {error_msg}"
-            return
-
-    # 3. Apakah LLM memutuskan untuk memanggil tool? (Cek native tool_calls atau format Groq yang bocor)
+    # ── Langkah 1: Loop Pemanggilan LLM (Maksimal 3 Putaran Tool) ─────────
+    max_tool_turns = 3
+    turn = 0
     has_tool_call = False
-    
-    if response_message.tool_calls:
-        has_tool_call = True
-        conversation.append(response_message)
-        
-        for tool_call in response_message.tool_calls:
-            print(f"[HARIS] LLM memanggil tool (Native): {tool_call.function.name} dengan args: {tool_call.function.arguments}")
-            tool_result = await execute_tool(tool_call, db)
-            
-            conversation.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "name": tool_call.function.name,
-                "content": str(tool_result),
-            })
-            
-    elif response_message.content and "<function=" in response_message.content:
-        # Penanganan khusus jika Groq membocorkan tag <function=...>
-        has_tool_call = True
-        content = response_message.content
-        conversation.append({"role": "assistant", "content": content})
-        
-        # Ekstrak menggunakan Regex
-        matches = re.finditer(r"<function=([^>]+)>(.*?)</function>", content)
-        for match in matches:
-            func_name = match.group(1).strip()
-            args_str = match.group(2).strip()
-            print(f"[HARIS] LLM memanggil tool (Groq Parser): {func_name} dengan args: {args_str}")
-            
-            # Buat mock tool_call object agar bisa diproses execute_tool
-            class MockFunction:
-                name = func_name
-                arguments = args_str if args_str.startswith("{") else f'{{"name": "{args_str}"}}'
-            class MockToolCall:
-                id = f"call_{func_name}"
-                function = MockFunction()
-                
-            tool_result = await execute_tool(MockToolCall(), db)
-            
-            conversation.append({
-                "role": "user",
-                "content": f"[System: Hasil dari {func_name}]:\n{tool_result}",
-            })
+    response_message = None
 
+    while turn < max_tool_turns:
+        turn += 1
+        try:
+            response = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=conversation,
+                tools=HRIS_TOOLS,
+                tool_choice="auto",
+                temperature=0.1,
+            )
+            response_message = response.choices[0].message
+        except Exception as e:
+            error_msg = str(e)
+            yield f"⚠️ HARIS gagal memproses permintaan: {error_msg}"
+            return
+
+        current_turn_has_tool = False
+
+        if response_message.tool_calls:
+            current_turn_has_tool = True
+            has_tool_call = True
+            conversation.append(response_message)
+            
+            for tool_call in response_message.tool_calls:
+                print(f"[HARIS] LLM memanggil tool (Putaran {turn}): {tool_call.function.name} dengan args: {tool_call.function.arguments}")
+                result = await execute_tool(tool_call, db)
+                
+                if tool_call.function.name == "generate_chart_image":
+                    yield str(result) + "\n\n"
+                    tool_content = "GRAFIK BERHASIL DITAMPILKAN SECARA OTOMATIS OLEH SISTEM. Tolong berikan analisis singkat dari grafik ini tanpa membuat link url apa pun lagi."
+                else:
+                    tool_content = str(result)
+
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": tool_content,
+                })
+                
+        elif response_message.content and ("<function=" in response_message.content or "<tool_call>" in response_message.content or '{"name":' in response_message.content):
+            current_turn_has_tool = True
+            has_tool_call = True
+            content = response_message.content
+            conversation.append({"role": "assistant", "content": content})
+
+            # Coba tangkap JSON mentah
+            raw_json_match = re.search(r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}', content, re.DOTALL)
+            
+            if raw_json_match:
+                func_name = raw_json_match.group(1).strip()
+                args_str = raw_json_match.group(2).strip()
+                print(f"[HARIS] Groq JSON parser (Putaran {turn}): {func_name} | args: {args_str}")
+            else:
+                match = re.search(r"<function=([^>]+)>(.*?)</function>", content)
+                if match:
+                    func_name = match.group(1).strip()
+                    args_str = match.group(2).strip()
+                    print(f"[HARIS] Groq function parser (Putaran {turn}): {func_name} | args: {args_str}")
+                else:
+                    func_name = None
+                    args_str = "{}"
+            
+            if func_name:
+                class _MockFn:
+                    name = func_name
+                    arguments = args_str if args_str.startswith("{") else f'{{"name": "{args_str}"}}'
+                class _MockCall:
+                    id = f"call_{func_name}"
+                    function = _MockFn()
+
+                result = await execute_tool(_MockCall(), db)
+                
+                if func_name == "generate_chart_image":
+                    yield str(result) + "\n\n"
+                    tool_content = "GRAFIK BERHASIL DITAMPILKAN SECARA OTOMATIS OLEH SISTEM. Tolong berikan analisis singkat dari grafik ini tanpa membuat link url apa pun lagi."
+                else:
+                    tool_content = str(result)
+                    
+                conversation.append({
+                    "role": "user",
+                    "content": f"[System: Hasil dari {func_name}]:\n{tool_content}",
+                })
+
+        if not current_turn_has_tool:
+            break
+
+    # ── Langkah 2: Stream jawaban final ke frontend ────────────────
     if has_tool_call:
-        # 4. Stream jawaban final setelah mendapat data
-        stream = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=conversation,
-            temperature=0.7,
-            stream=True,
-        )
-        
+        try:
+            stream = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=conversation,
+                temperature=0.7,
+                stream=True,
+            )
+        except Exception as e:
+            yield f"\n⚠️ [Stream Error]: {str(e)}"
+            return
         # State machine untuk menyembunyikan tag <think>...</think>
         buffer = ""
         is_thinking = False
