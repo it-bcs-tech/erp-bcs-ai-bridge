@@ -11,8 +11,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import json
+import hashlib
 from app.database import get_db
 from app.agents.fms_agent import process_fms_chat
+from app.redis_client import get_cache, set_cache
 
 router = APIRouter()
 
@@ -55,9 +58,24 @@ async def fms_chat(
     """
     messages_dict = [msg.model_dump() for msg in request.messages]
 
+    # Generate Hash Key unik dari pesan chat
+    cache_key = "fms_chat:" + hashlib.md5(json.dumps(messages_dict, sort_keys=True).encode()).hexdigest()
+
     async def generate():
+        # Cek Cache dulu
+        cached_response = await get_cache(cache_key)
+        if cached_response:
+            yield cached_response
+            return
+
+        full_response = ""
         async for chunk in process_fms_chat(messages_dict):
+            full_response += chunk
             yield chunk
+            
+        # Simpan ke cache (TTL = 45 detik untuk armada real-time)
+        if full_response.strip():
+            await set_cache(cache_key, full_response, ttl_seconds=45)
 
     return StreamingResponse(
         generate(),

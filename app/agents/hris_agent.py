@@ -29,6 +29,7 @@ from app.tools.presensi import (
 )
 from app.llm.llm_client import client, settings
 from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
+from app.llm.tool_router import get_relevant_tools
 from typing import AsyncGenerator
 
 
@@ -140,14 +141,12 @@ SYSTEM_PROMPT = """Anda adalah AI Assistant cerdas bernama "HARIS" untuk PT BCS 
 Tugas Anda adalah membantu tim HR mencari dan menganalisis data karyawan & absensi, serta memberikan edukasi terkait ketenagakerjaan.
 
 ## Aturan Penting:
-1. Anda DILENGKAPI dengan fungsi/tools (Function Calling). JIKA user meminta data, ANDA WAJIB memanggil tools tersebut. JANGAN PERNAH MENJAWAB TANPA MEMANGGIL TOOL JIKA DATA DIBUTUHKAN.
+1. Anda DILENGKAPI dengan fungsi/tools (Function Calling). JIKA user meminta data, ANDA WAJIB memanggil tools tersebut secara sistemik. JANGAN PERNAH mengetikkan niat Anda seperti "Menggunakan Function: X" atau mencetak parameter JSON mentah ke dalam teks balasan! Cukup panggil alatnya di latar belakang!
 2. JANGAN PERNAH mengarang angka, nama, atau hasil analisis.
 3. Jawab dalam Bahasa Indonesia yang profesional dan ramah. Gunakan emoji.
 4. Anda bisa melakukan analisis, merangkum, dan membandingkan data yang dikembalikan oleh tool.
-5. 🛡️ PEMBATASAN TOPIK SANGAT KETAT: Anda HANYA diizinkan menjawab pertanyaan seputar HRIS, data karyawan, absensi, perusahaan PT BCS Logistics, dan Undang-Undang Ketenagakerjaan. JIKA pengguna bertanya di luar topik tersebut (misalnya matematika dasar, coding, cuaca, politik, resep masakan, armada, FMS, atau modul lain), Anda HARUS MUTLAK MENOLAK DENGAN SOPAN. 
-Contoh penolakan: "Maaf, saya adalah HARIS (Asisten HRIS). Saya hanya diprogram untuk membantu urusan kepegawaian dan HR. Saya tidak dapat menjawab pertanyaan tersebut."
-6. 📊 VISUALISASI GRAFIK: Jika pengguna meminta grafik, bagan (bar, pie, line), atau diagram visual, panggil tool `generate_chart_image` dengan data yang Anda miliki. 
-**ATURAN MUTLAK GRAFIK:** Grafik akan DICETAK SECARA OTOMATIS oleh sistem ke layar pengguna. Oleh karena itu, di jawaban akhir Anda, Anda DILARANG KERAS mencetak atau membuat markdown gambar (seperti `![grafik](...)`) atau URL tautan apa pun! Tugas Anda HANYA memberikan penjelasan/analisis teks singkat dari data grafik tersebut!
+5. 🛡️ PEMBATASAN TOPIK SANGAT KETAT: Anda HANYA diizinkan menjawab pertanyaan seputar HRIS, data karyawan, absensi, perusahaan PT BCS Logistics, dan Undang-Undang Ketenagakerjaan. JIKA pengguna bertanya di luar topik tersebut, tolak dengan sopan.
+6. 📊 VISUALISASI GRAFIK: Jika pengguna meminta grafik, panggil tool `generate_chart_image`. DILARANG KERAS mencetak markdown gambar/URL secara manual.
 """
 
 
@@ -188,32 +187,29 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
         return f"INFO DATABASE: Terjadi kesalahan saat mengambil data: {str(e)}"
 
 
-async def process_chat(messages: list[dict], db: AsyncSession) -> AsyncGenerator[str, None]:
-    """
-    1. Kirim prompt + tools ke LLM
-    2. Jika LLM memanggil tool, eksekusi tool, dan kembalikan hasilnya ke LLM
-    3. Stream jawaban final ke user
-    """
-    
-    now_str = datetime.now().strftime("%d %B %Y (%H:%M)")
-    dynamic_system_prompt = SYSTEM_PROMPT + f"\n[INFO SISTEM: Waktu dunia nyata saat ini adalah {now_str}. Jangan pernah berasumsi bahwa saat ini tahun 2024. Gunakan tahun ini (2026 atau seterusnya) sebagai acuan dasar.]\n"
+async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGenerator[str, None]:
+    now_str = datetime.now().strftime("%d %B %Y (%H:%M WIB)")
+    dynamic_prompt = (
+        SYSTEM_PROMPT
+        + f"\n[INFO SISTEM: Waktu sekarang adalah {now_str}.]\n"
+    )
 
-    # 1. Siapkan history percakapan
-    conversation = [{"role": "system", "content": dynamic_system_prompt}] + messages
-    
-    # 2. Panggil LLM
-    try:
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=conversation,
-            tools=HRIS_TOOLS,
-            tool_choice="auto",
-            temperature=0.1, # Rendah agar tool calling konsisten
-        )
-        response_message = response.choices[0].message
-    except Exception as e:
-        # Jika Groq API throw 400 Tool Use Failed
-        error_msg = str(e)
+    conversation = [{"role": "system", "content": dynamic_prompt}] + messages
+
+    # ── Langkah 0: Pemilihan Alat Dinamis (Intent Routing) ──
+    # Ambil pesan terakhir dari user
+    last_user_msg = ""
+    for m in reversed(messages):
+        if m["role"] == "user":
+            last_user_msg = m["content"]
+            break
+            
+    active_tools = await get_relevant_tools(last_user_msg, HRIS_TOOLS)
+    if active_tools:
+        print(f"[HARIS Router] Mengaktifkan alat: {[t['function']['name'] for t in active_tools]}")
+    else:
+        print("[HARIS Router] Pertanyaan umum terdeteksi. Tidak ada alat yang diaktifkan (Hemat Token).")
+
     # ── Langkah 1: Loop Pemanggilan LLM (Maksimal 3 Putaran Tool) ─────────
     max_tool_turns = 3
     turn = 0
@@ -223,14 +219,23 @@ async def process_chat(messages: list[dict], db: AsyncSession) -> AsyncGenerator
     while turn < max_tool_turns:
         turn += 1
         try:
-            response = await client.chat.completions.create(
-                model=settings.llm_model,
-                messages=conversation,
-                tools=HRIS_TOOLS,
-                tool_choice="auto",
-                temperature=0.1,
-            )
+            if active_tools:
+                response = await client.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=conversation,
+                    tools=active_tools,
+                    tool_choice="auto",
+                    temperature=0.1,
+                )
+            else:
+                response = await client.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=conversation,
+                    temperature=0.7,
+                )
+            
             response_message = response.choices[0].message
+
         except Exception as e:
             error_msg = str(e)
             yield f"⚠️ HARIS gagal memproses permintaan: {error_msg}"

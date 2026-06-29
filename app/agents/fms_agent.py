@@ -23,6 +23,7 @@ from app.tools.fms_tools import (
     get_units_by_status,
     get_fleet_summary_for_monitoring,
     get_driver_trip_stats,
+    get_unit_trip_stats,
 )
 from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
 
@@ -62,6 +63,23 @@ FMS_TOOLS = [
                 "required": ["nopol"],
             },
         },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_unit_trip_stats",
+            "description": "Ambil rekap total trip selesai & aktif untuk suatu unit armada (nomor polisi/nopol) secara harian, mingguan, bulanan, dan tahunan. Kosongkan parameter nopol untuk mendapatkan peringkat/leaderboard trip top 20 unit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nopol": {
+                        "type": "string",
+                        "description": "Nomor polisi unit armada. Biarkan string kosong untuk melihat keseluruhan unit."
+                    }
+                },
+                "required": []
+            }
+        }
     },
     {
         "type": "function",
@@ -147,15 +165,13 @@ Tugas Anda adalah membantu tim operasional FMS (Fleet Management System) untuk:
 - Menjawab pertanyaan spesifik tentang unit atau pengemudi
 
 ## Aturan Penting:
-1. Anda DILENGKAPI dengan tools GPS real-time. WAJIB panggil tools jika data dibutuhkan.
-2. JANGAN PERNAH mengarang data palsu. NAMUN, JANGAN PERNAH MENOLAK menampilkan daftar unit hanya karena nama driver kosong/strip (-). Jika user meminta daftar unit dan driver, Anda WAJIB langsung menuliskannya secara rinci (contoh: "- B 1234 XX | Driver: -").
+1. Anda DILENGKAPI dengan tools GPS real-time. WAJIB panggil tools jika data dibutuhkan secara sistemik. JANGAN PERNAH mengetikkan niat Anda seperti "Menggunakan Function: X" atau mencetak JSON ke dalam teks balasan!
+2. JANGAN PERNAH mengarang data palsu. NAMUN, JANGAN PERNAH MENOLAK menampilkan daftar unit hanya karena nama driver kosong/strip (-).
 3. Data GPS diperbarui setiap 30 detik — selalu informasikan ini kepada user jika relevan.
 4. Jawab dalam Bahasa Indonesia yang profesional, singkat, dan to-the-point. Gunakan emoji.
-5. 🛡️ PEMBATASAN TOPIK: Anda HANYA menjawab pertanyaan seputar armada, GPS, monitoring unit, logistik, dan pengiriman BCS. JIKA ditanya di luar topik, tolak dengan sopan: "Maaf, saya FARIDA — asisten monitoring armada. Saya hanya bisa membantu urusan fleet dan GPS."
-6. Untuk deteksi kemacetan: kecepatan < 5 km/h saat status Moving = MACET. \
-5–20 km/h = LALU LINTAS PADAT. Sampaikan koordinat GPS untuk referensi tim lapangan.
-7. 📊 VISUALISASI GRAFIK: Jika pengguna meminta grafik atau visualisasi, panggil tool `generate_chart_image`.
-**ATURAN MUTLAK GRAFIK:** Grafik akan DICETAK SECARA OTOMATIS oleh sistem ke layar pengguna. Oleh karena itu, di jawaban akhir Anda, Anda DILARANG KERAS mencetak atau membuat markdown gambar (seperti `![grafik](...)`) atau URL tautan apa pun! Tugas Anda HANYA memberikan penjelasan/analisis teks singkat dari data grafik tersebut!
+5. 🛡️ PEMBATASAN TOPIK: Anda HANYA menjawab pertanyaan seputar armada, GPS, monitoring unit, logistik, dan pengiriman BCS. JIKA ditanya di luar topik, tolak dengan sopan.
+6. Untuk deteksi kemacetan: kecepatan < 5 km/h saat status Moving = MACET. 5–20 km/h = LALU LINTAS PADAT.
+7. 📊 VISUALISASI GRAFIK: Jika pengguna meminta grafik atau visualisasi, panggil tool `generate_chart_image`. DILARANG KERAS mencetak markdown gambar/URL secara manual.
 """
 
 
@@ -182,6 +198,8 @@ async def _execute_fms_tool(tool_call) -> str:
             return await get_fleet_summary_for_monitoring()
         elif func_name == "get_driver_trip_stats":
             return await get_driver_trip_stats(driver_name=args.get("driver_name"))
+        elif func_name == "get_unit_trip_stats":
+            return await get_unit_trip_stats(nopol=args.get("nopol", ""))
         elif func_name == "generate_chart_image":
             return await generate_chart_image(**args)
         else:
@@ -226,6 +244,8 @@ async def _stream_filtered(stream) -> AsyncGenerator[str, None]:
 
 # ── 5. Main Process Chat ──────────────────────────────────────────
 
+from app.llm.tool_router import get_relevant_tools
+
 async def process_fms_chat(
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
@@ -244,6 +264,19 @@ async def process_fms_chat(
 
     conversation = [{"role": "system", "content": dynamic_prompt}] + messages
 
+    # ── Langkah 0: Pemilihan Alat Dinamis (Intent Routing) ──
+    last_user_msg = ""
+    for m in reversed(messages):
+        if m["role"] == "user":
+            last_user_msg = m["content"]
+            break
+            
+    active_tools = await get_relevant_tools(last_user_msg, FMS_TOOLS)
+    if active_tools:
+        print(f"[FARIDA Router] Mengaktifkan alat: {[t['function']['name'] for t in active_tools]}")
+    else:
+        print("[FARIDA Router] Pertanyaan umum terdeteksi. Tidak ada alat yang diaktifkan (Hemat Token).")
+
     # ── Langkah 1: Loop Pemanggilan LLM (Maksimal 3 Putaran Tool) ─────────
     max_tool_turns = 3
     turn = 0
@@ -252,13 +285,20 @@ async def process_fms_chat(
     while turn < max_tool_turns:
         turn += 1
         try:
-            response = await client.chat.completions.create(
-                model=settings.llm_model,
-                messages=conversation,
-                tools=FMS_TOOLS,
-                tool_choice="auto",
-                temperature=0.1,
-            )
+            if active_tools:
+                response = await client.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=conversation,
+                    tools=active_tools,
+                    tool_choice="auto",
+                    temperature=0.1,
+                )
+            else:
+                response = await client.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=conversation,
+                    temperature=0.7,
+                )
             response_message = response.choices[0].message
         except Exception as e:
             error_msg = str(e)

@@ -415,3 +415,68 @@ async def get_driver_trip_stats(driver_name: str = "") -> str:
             )
         except Exception as e:
             return f"INFO DATABASE: Terjadi kesalahan saat mengambil data trip: {str(e)}"
+
+async def get_unit_trip_stats(nopol: str = "") -> str:
+    """
+    Mengambil data riwayat penyelesaian trip suatu unit/kendaraan secara harian, mingguan, bulanan, dan tahunan.
+    Mencakup semua status perjalanan (COMPLETED, aktif, dll).
+    Jika nopol kosong, mengembalikan perbandingan top unit (leaderboard).
+    """
+    async with async_session() as db:
+        if not nopol or nopol.strip() in ("", "-", "Unknown"):
+            query = """
+                SELECT 
+                    u.no_unit as unit_nopol,
+                    COUNT(CASE WHEN t.status = 'COMPLETED' THEN 1 END) as total_selesai,
+                    COUNT(CASE WHEN t.status != 'COMPLETED' AND t.status != 'CANCELED' THEN 1 END) as total_aktif
+                FROM fleet.trip t
+                JOIN master.m_unit u ON t.unit_id = u.id
+                GROUP BY u.no_unit
+                HAVING COUNT(t.id) > 0
+                ORDER BY total_selesai DESC
+                LIMIT 20
+            """
+            try:
+                result = await db.execute(text(query))
+                rows = result.fetchall()
+                if not rows:
+                    return "INFO DATABASE: Belum ada data perjalanan (trip) yang terekam di sistem."
+                
+                lines = ["Statistik Perbandingan Trip Antar Unit (Top 20):"]
+                for r in rows:
+                    lines.append(f"- Unit '{r.unit_nopol}': {r.total_selesai} selesai, {r.total_aktif} aktif")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"INFO DATABASE: Terjadi kesalahan saat mengambil perbandingan trip unit: {str(e)}"
+                
+        # Jika nopol spesifik diberikan:
+        nopol_clean = nopol.replace(" ", "").upper()
+        query = """
+            SELECT 
+                COUNT(CASE WHEN DATE(t.tgl_trip) = CURRENT_DATE THEN 1 END) as harian,
+                COUNT(CASE WHEN t.tgl_trip >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as mingguan,
+                COUNT(CASE WHEN EXTRACT(MONTH FROM t.tgl_trip) = EXTRACT(MONTH FROM CURRENT_DATE) AND EXTRACT(YEAR FROM t.tgl_trip) = EXTRACT(YEAR FROM CURRENT_DATE) THEN 1 END) as bulanan,
+                COUNT(CASE WHEN EXTRACT(YEAR FROM t.tgl_trip) = EXTRACT(YEAR FROM CURRENT_DATE) THEN 1 END) as tahunan,
+                COUNT(CASE WHEN t.status = 'COMPLETED' THEN 1 END) as total_selesai,
+                COUNT(CASE WHEN t.status != 'COMPLETED' AND t.status != 'CANCELED' THEN 1 END) as total_aktif
+            FROM fleet.trip t
+            JOIN master.m_unit u ON t.unit_id = u.id
+            WHERE REPLACE(UPPER(u.no_unit), ' ', '') LIKE :nopol
+        """
+        try:
+            result = await db.execute(text(query), {"nopol": f"%{nopol_clean}%"})
+            row = result.fetchone()
+            if not row or (row.harian == 0 and row.mingguan == 0 and row.bulanan == 0 and row.tahunan == 0 and row.total_selesai == 0 and row.total_aktif == 0):
+                return f"INFO DATABASE: Tidak ditemukan riwayat trip apapun untuk unit dengan nopol '{nopol}'."
+                
+            return (
+                f"Statistik Seluruh Trip (Aktif & Selesai) untuk Unit '{nopol}':\n"
+                f"- Harian (Hari ini): {row.harian} trip\n"
+                f"- Mingguan (7 hari terakhir): {row.mingguan} trip\n"
+                f"- Bulanan (Bulan ini): {row.bulanan} trip\n"
+                f"- Tahunan (Tahun ini): {row.tahunan} trip\n"
+                f"- Total Trip Selesai: {row.total_selesai}\n"
+                f"- Total Trip Sedang Aktif: {row.total_aktif}\n"
+            )
+        except Exception as e:
+            return f"INFO DATABASE: Terjadi kesalahan saat mengambil data trip unit: {str(e)}"

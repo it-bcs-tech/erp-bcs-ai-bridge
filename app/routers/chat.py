@@ -8,10 +8,13 @@ dan mengembalikan streaming response dari AI.
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import json
+import hashlib
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.agents.hris_agent import process_chat
+from app.agents.hris_agent import process_hris_chat
+from app.redis_client import get_cache, set_cache
 
 router = APIRouter()
 
@@ -52,9 +55,24 @@ async def chat(
     # Convert Pydantic models ke dict untuk agent
     messages_dict = [msg.model_dump() for msg in request.messages]
 
+    # Generate Hash Key unik dari pesan chat (Cache Key)
+    cache_key = "hris_chat:" + hashlib.md5(json.dumps(messages_dict, sort_keys=True).encode()).hexdigest()
+
     async def generate():
-        async for chunk in process_chat(messages_dict, db):
+        # Cek Cache dulu
+        cached_response = await get_cache(cache_key)
+        if cached_response:
+            yield cached_response
+            return
+
+        full_response = ""
+        async for chunk in process_hris_chat(messages_dict, db):
+            full_response += chunk
             yield chunk
+            
+        # Simpan ke cache jika tidak kosong (TTL = 30 menit / 1800 detik)
+        if full_response.strip():
+            await set_cache(cache_key, full_response, ttl_seconds=1800)
 
     return StreamingResponse(
         generate(),
