@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # ── LLM / AI Provider (OpenAI-compatible) ────────────────
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_api_key: str = "your-api-key-here"
-    llm_model: str = "qwen/qwen3-32b"
+    llm_model: str = "openai/gpt-oss-120b"
 
     # ── Database ─────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://bcs_admin:sangatrahasia@localhost:5433/mybcs_db"
