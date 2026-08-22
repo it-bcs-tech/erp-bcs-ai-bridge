@@ -315,12 +315,17 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
     # ── Langkah 2: Stream jawaban final ke frontend ────────────────
     if has_tool_call:
         try:
-            stream = await client.chat.completions.create(
-                model=settings.llm_model,
-                messages=conversation,
-                temperature=0.7,
-                stream=True,
-            )
+            stream_kwargs = {
+                "model": settings.llm_model,
+                "messages": conversation,
+                "temperature": 0.7,
+                "stream": True,
+            }
+            if active_tools:
+                stream_kwargs["tools"] = active_tools
+                stream_kwargs["tool_choice"] = "auto"
+
+            stream = await client.chat.completions.create(**stream_kwargs)
         except Exception as e:
             yield f"\n⚠️ [Stream Error]: {str(e)}"
             return

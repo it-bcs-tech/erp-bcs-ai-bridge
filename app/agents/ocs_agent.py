@@ -149,14 +149,19 @@ async def process_ocs_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
             })
 
     if has_tool_call:
-        stream = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=conversation,
-            temperature=0.7,
-            stream=True,
-        )
-        async for chunk in _stream_filtered(stream):
-            yield chunk
+        try:
+            stream = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=conversation,
+                tools=ORIS_TOOLS,
+                tool_choice="auto",
+                temperature=0.7,
+                stream=True,
+            )
+            async for chunk in _stream_filtered(stream):
+                yield chunk
+        except Exception as e:
+            yield f"\n⚠️ [Stream Error]: {str(e)}"
     else:
         if response_message.content:
             clean = re.sub(r"<think>.*?</think>", "", response_message.content, flags=re.DOTALL).strip()
