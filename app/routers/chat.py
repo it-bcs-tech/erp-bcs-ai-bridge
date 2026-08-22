@@ -70,8 +70,8 @@ async def chat(
             full_response += chunk
             yield chunk
             
-        # Simpan ke cache jika tidak kosong (TTL = 30 menit / 1800 detik)
-        if full_response.strip():
+        # Simpan ke cache jika tidak kosong dan bukan pesan error (TTL = 30 menit / 1800 detik)
+        if full_response.strip() and not full_response.strip().startswith("⚠️") and "Error code:" not in full_response:
             await set_cache(cache_key, full_response, ttl_seconds=1800)
 
     return StreamingResponse(
