@@ -23,6 +23,7 @@ from app.routers.dispatch import router as dispatch_router
 from app.routers.maintenance import router as maintenance_router
 from app.routers.scoring import router as scoring_router
 from app.routers.trip_summary import router as trip_summary_router
+from app.routers.sim_scanner import router as sim_scanner_router
 
 settings = get_settings()
 
@@ -82,6 +83,7 @@ app.include_router(dispatch_router, prefix="/fms", tags=["FMS Dispatch Intellige
 app.include_router(maintenance_router, prefix="/fms", tags=["FMS Maintenance Intelligence"])
 app.include_router(scoring_router, prefix="/fms", tags=["FMS Driver Scoring"])
 app.include_router(trip_summary_router, prefix="/fms", tags=["FMS Trip Summary"])
+app.include_router(sim_scanner_router, prefix="/ocs", tags=["OCS SIM Scanner"])
 
 
 # ── Root Endpoint ────────────────────────────────────────────
