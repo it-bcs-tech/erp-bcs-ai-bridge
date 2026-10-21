@@ -73,8 +73,8 @@ FMS_TOOLS = [
                 "type": "object",
                 "properties": {
                     "nopol": {
-                        "type": "string",
-                        "description": "Nomor polisi unit armada. Biarkan string kosong untuk melihat keseluruhan unit."
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nomor polisi unit armada. Biarkan string kosong atau null untuk melihat keseluruhan unit."
                     }
                 },
                 "required": []
@@ -143,8 +143,8 @@ FMS_TOOLS = [
                 "type": "object",
                 "properties": {
                     "driver_name": {
-                        "type": "string",
-                        "description": "Nama pengemudi (driver) yang dicari. Kosongkan (string kosong) jika ingin membandingkan seluruh driver.",
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama pengemudi (driver) yang dicari. Kosongkan atau null jika ingin membandingkan seluruh driver."
                     }
                 }
             },
@@ -246,6 +246,29 @@ async def _stream_filtered(stream) -> AsyncGenerator[str, None]:
 
 from app.llm.tool_router import get_relevant_tools
 
+def prune_conversation_history(messages: list[dict], max_history: int = 6, max_assistant_chars: int = 600) -> list[dict]:
+    clean = []
+    for m in messages:
+        c = m.get("content", "")
+        if isinstance(c, str) and (c.strip().startswith("⚠️") or "Error code:" in c):
+            continue
+        clean.append(m)
+
+    sliced = clean[-max_history:]
+    pruned = []
+    for i, m in enumerate(sliced):
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "assistant" and isinstance(content, str) and len(content) > max_assistant_chars and i < len(sliced) - 1:
+            pruned.append({
+                "role": role,
+                "content": content[:max_assistant_chars] + "\n\n...[Ringkasan data tabel sebelumnya untuk konteks]..."
+            })
+        else:
+            pruned.append(m)
+    return pruned
+
+
 async def process_fms_chat(
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
@@ -262,7 +285,8 @@ async def process_fms_chat(
         "Data GPS diperbarui otomatis setiap 30 detik dari EasyGo GPS.]\n"
     )
 
-    conversation = [{"role": "system", "content": dynamic_prompt}] + messages
+    optimized_messages = prune_conversation_history(messages, max_history=6, max_assistant_chars=600)
+    conversation = [{"role": "system", "content": dynamic_prompt}] + optimized_messages
 
     # ── Langkah 0: Pemilihan Alat Dinamis (Intent Routing) ──
     last_user_msg = ""
@@ -281,13 +305,14 @@ async def process_fms_chat(
     max_tool_turns = 3
     turn = 0
     has_tool_call = False
+    current_model = settings.llm_model
 
     while turn < max_tool_turns:
         turn += 1
         try:
             if active_tools:
                 response = await client.chat.completions.create(
-                    model=settings.llm_model,
+                    model=current_model,
                     messages=conversation,
                     tools=active_tools,
                     tool_choice="auto",
@@ -295,15 +320,92 @@ async def process_fms_chat(
                 )
             else:
                 response = await client.chat.completions.create(
-                    model=settings.llm_model,
+                    model=current_model,
                     messages=conversation,
                     temperature=0.7,
                 )
             response_message = response.choices[0].message
         except Exception as e:
             error_msg = str(e)
-            yield f"⚠️ FARIDA gagal memproses permintaan: {error_msg}"
-            return
+
+            # Auto-fallback jika model terkena Rate Limit (429) atau Request Too Large (413)
+            err_lower = error_msg.lower()
+            if "429" in error_msg or "413" in error_msg or "rate_limit" in err_lower or "request too large" in err_lower or "tokens per minute" in err_lower:
+                print(f"[FARIDA] Limit terdeteksi pada {current_model} ({error_msg[:100]}). Mencoba fallback model...")
+                if "413" in error_msg or "request too large" in err_lower or "tokens per minute" in err_lower:
+                    conversation = [{"role": "system", "content": dynamic_prompt}, messages[-1]]
+
+                candidate_models = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
+                recovered_via_fallback = False
+                for fb_m in candidate_models:
+                    if fb_m != current_model:
+                        try:
+                            print(f"[FARIDA] Mengalihkan turn {turn} ke model fallback: {fb_m}")
+                            if active_tools:
+                                response = await client.chat.completions.create(
+                                    model=fb_m,
+                                    messages=conversation,
+                                    tools=active_tools,
+                                    tool_choice="auto",
+                                    temperature=0.1,
+                                )
+                            else:
+                                response = await client.chat.completions.create(
+                                    model=fb_m,
+                                    messages=conversation,
+                                    temperature=0.7,
+                                )
+                            response_message = response.choices[0].message
+                            current_model = fb_m
+                            recovered_via_fallback = True
+                            break
+                        except Exception as fb_err:
+                            print(f"[FARIDA] Fallback {fb_m} gagal: {fb_err}")
+                if recovered_via_fallback:
+                    error_msg = ""
+                else:
+                    yield f"⚠️ FARIDA mengalami antrian kuota provider (Rate Limit): {error_msg}"
+                    return
+
+            failed_gen = None
+            if hasattr(e, "body") and isinstance(e.body, dict):
+                failed_gen = e.body.get("failed_generation")
+            elif hasattr(e, "response"):
+                try:
+                    resp_json = e.response.json()
+                    failed_gen = resp_json.get("error", {}).get("failed_generation")
+                except Exception:
+                    pass
+
+            if failed_gen:
+                try:
+                    fg_data = json.loads(failed_gen) if isinstance(failed_gen, str) else failed_gen
+                    func_name = fg_data.get("name")
+                    args_dict = fg_data.get("arguments", {})
+                    print(f"[FARIDA] Self-healing recovered tool call from failed_generation: {func_name} | args: {args_dict}")
+
+                    class _MockFn:
+                        name = func_name
+                        arguments = json.dumps(args_dict)
+
+                    class _MockToolCall:
+                        id = f"call_rec_{turn}_{func_name}"
+                        type = "function"
+                        function = _MockFn()
+
+                    class _MockMsg:
+                        role = "assistant"
+                        content = None
+                        tool_calls = [_MockToolCall()]
+
+                    response_message = _MockMsg()
+                except Exception as rec_err:
+                    print(f"[FARIDA] Could not recover from failed_generation: {rec_err}")
+                    response_message = None
+
+            if response_message is None:
+                yield f"⚠️ FARIDA gagal memproses permintaan: {error_msg}"
+                return
 
         current_turn_has_tool = False
 
@@ -311,7 +413,26 @@ async def process_fms_chat(
         if response_message.tool_calls:
             current_turn_has_tool = True
             has_tool_call = True
-            conversation.append(response_message)
+            if isinstance(response_message, dict):
+                conversation.append(response_message)
+            elif hasattr(response_message, "function_call"):
+                conversation.append(response_message)
+            else:
+                conversation.append({
+                    "role": "assistant",
+                    "content": getattr(response_message, "content", None),
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }
+                        }
+                        for tc in (response_message.tool_calls or [])
+                    ]
+                })
 
             for tool_call in response_message.tool_calls:
                 print(f"[FARIDA] Tool dipanggil (Putaran {turn}): {tool_call.function.name} | args: {tool_call.function.arguments}")
@@ -385,22 +506,37 @@ async def process_fms_chat(
 
     # ── Langkah 2: Stream jawaban final ──────────────────────
     if has_tool_call:
-        try:
-            stream_kwargs = {
-                "model": settings.llm_model,
-                "messages": conversation,
-                "temperature": 0.7,
-                "stream": True,
-            }
-            if active_tools:
-                stream_kwargs["tools"] = active_tools
-                stream_kwargs["tool_choice"] = "auto"
+        candidate_models = [current_model, "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
+        candidate_models = list(dict.fromkeys(candidate_models))
+        streamed = False
 
-            stream = await client.chat.completions.create(**stream_kwargs)
-            async for chunk in _stream_filtered(stream):
-                yield chunk
-        except Exception as e:
-            yield f"\n⚠️ [Stream Error]: {str(e)}"
+        for m_candidate in candidate_models:
+            try:
+                stream_kwargs = {
+                    "model": m_candidate,
+                    "messages": conversation,
+                    "temperature": 0.7,
+                    "stream": True,
+                }
+                if active_tools:
+                    stream_kwargs["tools"] = active_tools
+                    stream_kwargs["tool_choice"] = "auto"
+
+                stream = await client.chat.completions.create(**stream_kwargs)
+                async for chunk in _stream_filtered(stream):
+                    yield chunk
+                streamed = True
+                break
+            except Exception as e:
+                print(f"[FARIDA Stream] Model {m_candidate} gagal: {e}")
+                if "429" in str(e) or "rate_limit" in str(e).lower():
+                    continue
+                else:
+                    yield f"\n⚠️ [Stream Error]: {str(e)}"
+                    return
+
+        if not streamed:
+            yield "\n⚠️ Maaf, layanan monitoring FARIDA sedang mengalami antrian kuota provider AI."
     else:
         # Tidak ada tool call sama sekali sejak putaran pertama
         if response_message.content:

@@ -8,3 +8,6 @@ __pycache__/
 # Temporary/Test scripts
 inspect_fms_db.py
 test_chart.py
+
+# Generated charts
+app/static/charts/*.png

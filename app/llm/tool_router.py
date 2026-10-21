@@ -68,6 +68,22 @@ TOOL_KEYWORDS = {
         "rekap", "kumulatif", "bulanan", "tidak hadir bulan", "cuti bulan",
         "sakit bulan", "izin bulan",
     ],
+    "get_employee_attendance_logs": [
+        "telat", "terlambat", "late", "keterlambatan", "jam masuk", "jam datang",
+        "clock in", "clock-in", "log presensi", "riwayat presensi", "riwayat kehadiran",
+        "absen sebulan", "kehadiran sebulan", "log kehadiran", "disiplin", "kedisiplinan",
+        "history", "riwayat", "history absensi", "riwayat absensi", "history presensi",
+        "history kehadiran", "log absensi", "log absen", "riwayat absen",
+    ],
+    "get_employee_full_profile": [
+        "profil lengkap", "detail karyawan", "masa kerja", "lama kerja", "join date",
+        "tanggal masuk", "sisa cuti", "saldo cuti", "kuota cuti", "atasan", "biodata",
+        "kontrak berakhir", "habis kontrak", "detail profil", "data lengkap",
+    ],
+    "get_people_analytics": [
+        "ulang tahun", "ultah", "birthday", "anniversary", "masa bakti", "kontrak habis",
+        "habis kontrak", "perpanjangan kontrak", "expiring", "analytics", "monitoring kontrak",
+    ],
 
     # ─── FMS Tools ───
     "get_all_fleet_status": [
@@ -108,8 +124,10 @@ TOOL_KEYWORDS = {
 
 async def get_relevant_tools(user_message: str, available_tools: list) -> list:
     """
-    Menentukan alat yang relevan berdasarkan kata kunci di pesan pengguna.
-    Tidak memanggil LLM — instan dan deterministik.
+    Menentukan alat yang relevan berdasarkan pesan pengguna.
+    - Sapaan / basa-basi murni -> 0 alat (hemat token maksimal, respons instan).
+    - Pertanyaan substantif / operasional -> kembalikan seluruh tools yang tersedia
+      agar LLM memiliki kapabilitas pemanggilan tool secara lengkap (Zero Error 400).
 
     Returns:
         list: Daftar schema tool yang relevan (bisa kosong jika sapaan)
@@ -119,33 +137,12 @@ async def get_relevant_tools(user_message: str, available_tools: list) -> list:
 
     msg_lower = user_message.strip().lower()
 
-    # ── Langkah 1: Deteksi sapaan/basa-basi ──
+    # ── Langkah 1: Deteksi sapaan / basa-basi murni ──
     if GREETING_PATTERNS.match(msg_lower):
         return []
 
-    # ── Langkah 2: Cocokkan kata kunci dengan tool yang tersedia ──
-    available_names = {t["function"]["name"] for t in available_tools}
-    matched_names = set()
-
-    for tool_name, keywords in TOOL_KEYWORDS.items():
-        if tool_name not in available_names:
-            continue
-        for kw in keywords:
-            if kw in msg_lower:
-                matched_names.add(tool_name)
-                break
-
-    # ── Langkah 3: Jika ada kata kunci grafik, pastikan tool chart juga masuk ──
-    chart_keywords = ["grafik", "chart", "diagram", "visualisasi", "bagan", "pie", "bar", "line"]
-    if any(kw in msg_lower for kw in chart_keywords):
-        if "generate_chart_image" in available_names:
-            matched_names.add("generate_chart_image")
-
-    # ── Langkah 4: Jika ada tool cocok → kembalikan hanya yang cocok ──
-    if matched_names:
-        selected = [t for t in available_tools if t["function"]["name"] in matched_names]
-        return selected
-
-    # ── Langkah 5: Jika tidak ada yang cocok DAN bukan sapaan → SEMUA alat (fallback aman) ──
-    # Lebih baik mengirim semua alat daripada melewatkan tool call yang dibutuhkan
+    # ── Langkah 2: Sediakan seluruh tools untuk pertanyaan operasional ──
+    # Menghindari kegagalan validasi tool call (Error 400) pada pertanyaan multi-kategori
     return available_tools
+
+

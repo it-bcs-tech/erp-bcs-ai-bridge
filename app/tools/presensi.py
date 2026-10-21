@@ -124,6 +124,10 @@ async def get_attendance_monthly(db: AsyncSession, month: Optional[int] = None, 
     m = month or datetime.now().month
     y = year or datetime.now().year
     
+    # Jika parameter employee_id diberikan, alihkan langsung ke log detail karyawan tersebut
+    if employee_id:
+        return await get_employee_attendance_logs(db, name_or_id=employee_id, month=m, year=y)
+    
     query_aggregate = f"""
         SELECT 
             (SELECT COUNT(*) FROM presensi.presences WHERE EXTRACT(MONTH FROM date) = {m} AND EXTRACT(YEAR FROM date) = {y}) as hadir,
@@ -276,3 +280,150 @@ async def get_absent_monthly(db: AsyncSession, month: Optional[int] = None, year
     except Exception as e:
         logger.error(f"get_absent_monthly error: {e}")
         return f"INFO DATABASE: Terjadi kesalahan saat membaca rekap cuti bulanan: {str(e)}"
+
+
+# ── Tool 7: Log presensi individual & keterlambatan (Late-In) ─
+async def get_employee_attendance_logs(
+    db: AsyncSession,
+    name_or_id: str,
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    only_late: Optional[bool] = False,
+) -> str:
+    """Mengambil log presensi detail seorang karyawan pada periode tertentu, mencakup rekap hadir, tepat waktu, rincian hari keterlambatan (jam masuk, menit telat), dan rekap izin/cuti."""
+    try:
+        val = name_or_id.strip()
+        pattern = f"%{val}%"
+
+        # 1. Cari karyawan di master.m_karyawan dan master.m_presensi
+        q_find = text("""
+            SELECT k.id as karyawan_id, k.payroll_id, k.nama_karyawan, mp.id as presensi_user_id
+            FROM master.m_karyawan k
+            LEFT JOIN master.m_presensi mp ON mp.karyawan_id = k.id
+            WHERE k.payroll_id = :val OR LOWER(k.nama_karyawan) LIKE LOWER(:pattern)
+            LIMIT 5
+        """)
+        res_find = await db.execute(q_find, {"val": val, "pattern": pattern})
+        karyawan = res_find.mappings().all()
+
+        if not karyawan:
+            # Fallback cari langsung di m_presensi
+            q_fallback = text("""
+                SELECT mp.karyawan_id, COALESCE(k.payroll_id, '-') as payroll_id, mp.name as nama_karyawan, mp.id as presensi_user_id
+                FROM master.m_presensi mp
+                LEFT JOIN master.m_karyawan k ON mp.karyawan_id = k.id
+                WHERE LOWER(mp.name) LIKE LOWER(:pattern) OR CAST(mp.id AS TEXT) = :val
+                LIMIT 5
+            """)
+            res_fb = await db.execute(q_fallback, {"pattern": pattern, "val": val})
+            karyawan = res_fb.mappings().all()
+
+        if not karyawan:
+            return f"INFO DATABASE: Tidak ditemukan karyawan dengan nama atau ID '{name_or_id}'."
+
+        emp = karyawan[0]
+        uid = emp["presensi_user_id"]
+        nama = emp["nama_karyawan"]
+        payroll_id = emp["payroll_id"]
+
+        if not uid:
+            return f"INFO DATABASE: Karyawan {nama} (ID: {payroll_id}) terdaftar di master data, tetapi belum memiliki akun presensi digital."
+
+        y = year or datetime.now().year
+        m = month
+
+        month_clause = f"AND EXTRACT(MONTH FROM p.date) = {m}" if m else ""
+        month_label = f"Bulan {m} Tahun {y}" if m else f"Tahun {y}"
+
+        # 2. Query presensi
+        q_presences = text(f"""
+            SELECT 
+                p.date, 
+                p.clock_in, 
+                p.clock_out, 
+                p.status, 
+                COALESCE(p.late_minutes, 0) as late_minutes, 
+                COALESCE(p.working_hours, 0) as working_hours,
+                COALESCE(p.overtime_minutes, 0) as overtime_minutes
+            FROM presensi.presences p
+            WHERE p.user_id = :uid 
+              AND EXTRACT(YEAR FROM p.date) = :y
+              {month_clause}
+            ORDER BY p.date ASC
+        """)
+        res_p = await db.execute(q_presences, {"uid": uid, "y": y})
+        rows = res_p.mappings().all()
+
+        late_rows = []
+        on_time_rows = []
+        for r in rows:
+            st = (r["status"] or "").lower()
+            lm = r["late_minutes"] or 0
+            if "terlambat" in st or "late" in st or lm > 0:
+                late_rows.append(r)
+            else:
+                on_time_rows.append(r)
+
+        total_hadir = len(rows)
+        total_late = len(late_rows)
+        total_on_time = len(on_time_rows)
+        total_late_min = sum(r["late_minutes"] for r in late_rows)
+
+        # 3. Query izin/cuti
+        leave_m_clause = f"AND EXTRACT(MONTH FROM start_date) = {m}" if m else ""
+        q_leaves = text(f"""
+            SELECT type, start_date, end_date, reason
+            FROM presensi.leaves
+            WHERE user_id = :uid AND status = 'approved' AND EXTRACT(YEAR FROM start_date) = :y {leave_m_clause}
+            UNION ALL
+            SELECT type, start_date, end_date, reason
+            FROM presensi.permission_requests
+            WHERE user_id = :uid AND status = 'approved' AND EXTRACT(YEAR FROM start_date) = :y {leave_m_clause}
+        """)
+        res_l = await db.execute(q_leaves, {"uid": uid, "y": y})
+        leaves = res_l.mappings().all()
+
+        # 4. Format hasil
+        output = [
+            f"📋 REKAP PRESENSI & KEDISIPLINAN: {nama} (Payroll ID: {payroll_id})",
+            f"Periode: {month_label}\n",
+            f"📊 Ringkasan Kehadiran:",
+            f"• Total Hadir: {total_hadir} hari kerja",
+            f"• Tepat Waktu: {total_on_time} hari",
+            f"• Terlambat (Late-In): {total_late} kali (Total akumulasi keterlambatan: {total_late_min} menit)",
+        ]
+
+        if leaves:
+            leave_types = ", ".join([f"{l['type']} ({l['start_date'].strftime('%d/%m') if hasattr(l['start_date'], 'strftime') else l['start_date']})" for l in leaves])
+            output.append(f"• Izin/Cuti Disetujui: {len(leaves)} hari ({leave_types})")
+        else:
+            output.append("• Izin/Cuti Disetujui: 0 hari")
+
+        output.append(f"\n⏰ Detail Keterlambatan (Late-In):")
+        if total_late == 0:
+            if total_hadir == 0:
+                output.append("• Belum ada catatan kehadiran pada periode ini.")
+            else:
+                output.append("• Karyawan TIDAK memiliki catatan keterlambatan pada periode ini (Selalu Tepat Waktu! 🎉)")
+        else:
+            for r in late_rows:
+                tgl = r["date"].strftime("%d %B %Y") if hasattr(r["date"], "strftime") else str(r["date"])
+                cin = r["clock_in"].strftime("%H:%M:%S") if hasattr(r["clock_in"], "strftime") else str(r["clock_in"] or "-")
+                cout = r["clock_out"].strftime("%H:%M:%S") if hasattr(r["clock_out"], "strftime") else str(r["clock_out"] or "-")
+                lmin = r["late_minutes"]
+                output.append(f"• {tgl}: Masuk pukul {cin} (Terlambat {lmin} menit) | Pulang: {cout}")
+
+        if not only_late and 0 < total_hadir <= 15:
+            output.append(f"\n📅 Rincian Seluruh Kehadiran ({total_hadir} hari):")
+            for r in rows:
+                tgl = r["date"].strftime("%d %B %Y") if hasattr(r["date"], "strftime") else str(r["date"])
+                cin = r["clock_in"].strftime("%H:%M:%S") if hasattr(r["clock_in"], "strftime") else str(r["clock_in"] or "-")
+                cout = r["clock_out"].strftime("%H:%M:%S") if hasattr(r["clock_out"], "strftime") else str(r["clock_out"] or "-")
+                st = r["status"] or "Hadir"
+                output.append(f"• {tgl}: {cin} - {cout} ({st})")
+
+        return "\n".join(output)
+    except Exception as e:
+        logger.error(f"get_employee_attendance_logs error: {e}")
+        return f"INFO DATABASE: Terjadi kesalahan saat mengambil log presensi karyawan: {str(e)}"
+

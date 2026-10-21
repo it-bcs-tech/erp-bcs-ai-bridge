@@ -13,6 +13,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
+import sys
+
+# Ensure UTF-8 output on Windows console
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from app.config import get_settings
 from app.routers.chat import router as chat_router
@@ -33,7 +42,7 @@ async def lifespan(app: FastAPI):
     """Startup dan shutdown events."""
     # ── Startup ──────────────────────────────────────────
     print("=" * 50)
-    print("🚀 AI Bridge Starting...")
+    print("[STARTUP] AI Bridge Starting...")
     print(f"   Model    : {settings.llm_model}")
     print(f"   LLM URL  : {settings.llm_base_url}")
     print(f"   Database : {settings.database_url.split('@')[1] if '@' in settings.database_url else 'configured'}")
@@ -42,7 +51,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── Shutdown ─────────────────────────────────────────
-    print("🛑 AI Bridge Shutting Down...")
+    print("[SHUTDOWN] AI Bridge Shutting Down...")
     # Cleanup database connections
     from app.database import engine
     await engine.dispose()
@@ -61,7 +70,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",         # SvelteKit dev
+        "http://127.0.0.1:5173",
         "http://localhost:3000",         # SvelteKit production
+        "http://127.0.0.1:3000",
         "http://erp.bcslabs.tech",       # Production domain
         "https://erp.bcslabs.tech",
     ],
