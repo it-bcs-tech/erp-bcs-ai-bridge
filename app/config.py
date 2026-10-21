@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_api_key: str = "your-api-key-here"
     llm_model: str = "openai/gpt-oss-120b"
-    llm_vision_model: str = "llama-3.2-11b-vision-preview"
+    llm_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # ── Database ─────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://bcs_admin:sangatrahasia@localhost:5433/mybcs_db"
