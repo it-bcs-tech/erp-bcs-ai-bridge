@@ -22,6 +22,7 @@ settings = get_settings()
 
 class SimScanResponse(BaseModel):
     success: bool
+    is_rejected: Optional[bool] = False
     message: Optional[str] = None
     data: Optional[dict] = None
 
@@ -33,8 +34,8 @@ async def scan_sim(
     mime_type: Optional[str] = Form("image/jpeg"),
 ):
     """
-    Ekstrak data Surat Izin Mengemudi (SIM) dari berkas gambar via Vision AI.
-    Bisa menerima file multipart/form-data ATAU base64 string.
+    Ekstrak data Surat Izin Mengemudi (SIM) atau e-KTP dari berkas gambar via Vision AI.
+    Menolak secara tegas (Hard Reject) jika berkas bukan fisik SIM atau e-KTP yang sah.
     """
     base64_data = ""
     actual_mime = mime_type or "image/jpeg"
@@ -57,28 +58,42 @@ async def scan_sim(
         raise HTTPException(status_code=400, detail="File gambar SIM atau image_base64 wajib diunggah.")
 
     system_prompt = (
-        "Anda adalah asisten AI Vision OCR cerdas khusus membaca dokumen identitas resmi Republik Indonesia: "
+        "Anda adalah asisten AI Vision OCR resmi untuk verifikasi kartu identitas Republik Indonesia: "
         "Surat Izin Mengemudi (SIM) atau Kartu Tanda Penduduk (e-KTP). "
-        "Tugas Anda mendeteksi jenis dokumen yang diunggah dan mengekstrak informasi di dalamnya secara akurat. "
-        "Kembalikan HANYA JSON murni tanpa kata pengantar atau markdown."
+        "Tugas utama Anda adalah MEMVERIFIKASI keaslian dan jenis dokumen terlebih dahulu. "
+        "Jika gambar BUKAN fisik SIM asli dan BUKAN fisik e-KTP asli Republik Indonesia "
+        "(misal: STNK, BPKB, foto hewan, pemandangan, selfie/wajah tanpa kartu, faktur/surat biasa, atau gambar acak/buram tidak terbaca), Anda WAJIB MENOLAKNYA. "
+        "Kembalikan HANYA JSON murni tanpa markdown."
     )
 
     user_prompt = (
-        "Analisis gambar berikut. Deteksi apakah gambar ini adalah SIM atau KTP (e-KTP), lalu ekstrak datanya ke format JSON persis seperti ini:\n"
-        "{\n"
-        '  "doc_type": "SIM", // "SIM" atau "KTP"\n'
-        '  "sim_type": "SIM B2 UMUM", // Jika SIM, pilih salah satu: "SIM A", "SIM B1", "SIM B1 UMUM", "SIM B2", "SIM B2 UMUM", "SIM C". Jika KTP, isi null.\n'
-        '  "sim_number": "123456789012", // Jika SIM nomor SIM; jika KTP isi nomor NIK\n'
-        '  "nik": "3671012345670001", // Nomor NIK jika KTP, atau null jika SIM\n'
-        '  "driver_name": "NAMA LENGKAP", // Sesuai yang tercetak pada kartu\n'
-        '  "expiry_date": "YYYY-MM-DD", // Tanggal masa berlaku format ISO YYYY-MM-DD. Jika KTP Seumur Hidup, isi null.\n'
-        '  "birth_place": "KOTA LAHIR",\n'
-        '  "birth_date": "YYYY-MM-DD", // Format YYYY-MM-DD\n'
-        '  "address": "ALAMAT LENGKAP",\n'
-        '  "gender": "L / P",\n'
-        '  "blood_type": "A / B / AB / O / -",\n'
-        '  "confidence_score": 0.95 // Tingkat keyakinan (0.0 - 1.0)\n'
-        "}\n\n"
+        "Analisis gambar yang diunggah secara saksama:\n"
+        "1. Uji Keabsahan Dokumen:\n"
+        "   - Apakah gambar ini secara fisik adalah Surat Izin Mengemudi (SIM) Republik Indonesia yang jelas?\n"
+        "   - ATAU apakah gambar ini secara fisik adalah Kartu Tanda Penduduk Elektronik (e-KTP) Republik Indonesia yang jelas?\n"
+        "   - Jika BUKAN keduanya (misal: STNK, sertifikat, invoice, foto orang/selfie biasa, pemandangan, benda, teks dokumen biasa, atau gambar buram/palsu), maka KEMBALIKAN format penolakan:\n"
+        "   {\n"
+        '     "is_valid_id": false,\n'
+        '     "doc_type": "UNKNOWN",\n'
+        '     "rejection_reason": "Gambar yang diunggah bukan fisik kartu SIM atau e-KTP Republik Indonesia yang sah.",\n'
+        '     "confidence_score": 0.0\n'
+        "   }\n\n"
+        "2. Jika gambar BENAR adalah SIM atau e-KTP yang valid, kembalikan format:\n"
+        "   {\n"
+        '     "is_valid_id": true,\n'
+        '     "doc_type": "SIM", // "SIM" atau "KTP"\n'
+        '     "sim_type": "SIM B2 UMUM", // Jika SIM, pilih: "SIM A", "SIM B1", "SIM B1 UMUM", "SIM B2", "SIM B2 UMUM", "SIM C". Jika KTP, isi null.\n'
+        '     "sim_number": "123456789012", // Nomor SIM jika SIM, atau nomor NIK jika KTP\n'
+        '     "nik": "3671012345670001", // Nomor NIK jika KTP, atau null jika SIM\n'
+        '     "driver_name": "NAMA LENGKAP", // Sesuai kartu\n'
+        '     "expiry_date": "YYYY-MM-DD", // Tanggal masa berlaku ISO YYYY-MM-DD. Jika KTP Seumur Hidup, isi null.\n'
+        '     "birth_place": "KOTA LAHIR",\n'
+        '     "birth_date": "YYYY-MM-DD",\n'
+        '     "address": "ALAMAT LENGKAP",\n'
+        '     "gender": "L / P",\n'
+        '     "blood_type": "A / B / AB / O / -",\n'
+        '     "confidence_score": 0.95\n'
+        "   }\n\n"
         "Aturan Penting:\n"
         "1. Format tanggal WAJIB ISO YYYY-MM-DD. Jika tertulis '25-10-2029', ubah menjadi '2029-10-25'.\n"
         "2. Jangan tambahkan markdown triple backtick. Berikan respons HANYA teks JSON valid."
@@ -129,8 +144,26 @@ async def scan_sim(
 
             data = json.loads(cleaned_json)
 
-            # Normalisasi data
+            # Validasi Penolakan Keras (Hard Reject)
+            is_valid = data.get("is_valid_id", True)
             detected_doc = str(data.get("doc_type") or "").upper()
+            rejection_reason = data.get("rejection_reason") or "Gambar yang diunggah bukan fisik kartu SIM atau e-KTP yang sah."
+
+            if (
+                not is_valid
+                or "UNKNOWN" in detected_doc
+                or "INVALID" in detected_doc
+                or ("SIM" not in detected_doc and "KTP" not in detected_doc)
+                or (not data.get("sim_number") and not data.get("nik"))
+            ):
+                return SimScanResponse(
+                    success=False,
+                    is_rejected=True,
+                    message=f"Berkas Ditolak: {rejection_reason}",
+                    data=None,
+                )
+
+            # Normalisasi data jika lolos validasi
             if "KTP" in detected_doc:
                 data["doc_type"] = "KTP"
                 if not data.get("sim_type"):
@@ -157,6 +190,7 @@ async def scan_sim(
 
             return SimScanResponse(
                 success=True,
+                is_rejected=False,
                 message=f"Dokumen {data['doc_type']} berhasil dipindai oleh AI Vision ({model_name}).",
                 data=data,
             )
@@ -169,13 +203,7 @@ async def scan_sim(
     # Jika semua model vision gagal dicoba
     return SimScanResponse(
         success=False,
-        message=f"AI Vision tidak dapat memproses berkas (Error: {str(last_error)}). Silakan periksa atau isi manual.",
-        data={
-            "doc_type": "SIM",
-            "sim_type": "SIM B2 UMUM",
-            "sim_number": None,
-            "driver_name": None,
-            "expiry_date": None,
-            "raw_text": raw_content,
-        },
+        is_rejected=False,
+        message=f"AI Vision sedang offline atau foto buram. Form isian manual terbuka otomatis untuk diisi.",
+        data=None,
     )
