@@ -29,9 +29,14 @@ async def chat_endpoint(request: ChatRequest):
         async for chunk in process_ocs_chat(request.messages):
             full_response += chunk
             yield chunk
-            
-        # Simpan ke cache jika tidak kosong (TTL = 30 menit / 1800 detik)
-        if full_response.strip():
+
+        # Simpan ke cache jika valid dan bukan respon error (TTL = 30 menit / 1800 detik)
+        if (
+            full_response.strip()
+            and not full_response.startswith("⚠️")
+            and not full_response.startswith("❌")
+            and "gagal memproses permintaan" not in full_response
+        ):
             await set_cache(cache_key, full_response, ttl_seconds=1800)
 
     return StreamingResponse(

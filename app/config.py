@@ -7,6 +7,10 @@ Di production: dari docker-compose env_file atau .env file di server.
 
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from pathlib import Path
+import os
+
+ENV_FILE_PATH = str(Path(__file__).resolve().parent.parent / ".env")
 
 
 class Settings(BaseSettings):
@@ -31,7 +35,7 @@ class Settings(BaseSettings):
     ai_bridge_debug: bool = False
 
     model_config = {
-        "env_file": ".env",
+        "env_file": ENV_FILE_PATH if os.path.exists(ENV_FILE_PATH) else ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
     }

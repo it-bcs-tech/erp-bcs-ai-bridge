@@ -124,6 +124,139 @@ def _parse_vehicle(v: dict) -> dict:
     }
 
 
+# ── Helper: Fallback ke Database PostgreSQL jika GPS Offline ─────
+
+async def _fallback_fleet_from_database() -> str:
+    """
+    Fallback jika GPS server offline: mengambil rekap armada dari master.m_unit di database PostgreSQL.
+    """
+    try:
+        async with async_session() as db:
+            # Hitung total dan status
+            q_stats = """
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE is_active = TRUE) as aktif,
+                    COUNT(*) FILTER (WHERE is_active = FALSE) as non_aktif
+                FROM master.m_unit
+            """
+            res_stats = await db.execute(text(q_stats))
+            row_stats = res_stats.mappings().first()
+            total = row_stats["total"] or 0
+            aktif = row_stats["aktif"] or 0
+            non_aktif = row_stats["non_aktif"] or 0
+
+            # Hitung per kategori
+            q_cat = """
+                SELECT COALESCE(kategori, 'LAINNYA') as kat, COUNT(*) as cnt
+                FROM master.m_unit
+                WHERE is_active = TRUE
+                GROUP BY kategori
+                ORDER BY cnt DESC
+                LIMIT 5
+            """
+            res_cat = await db.execute(text(q_cat))
+            cat_lines = [f"  • {r['kat']}: {r['cnt']} unit" for r in res_cat.mappings().all()]
+
+            # Sample unit aktif terbaru beserta trip terakhir
+            q_units = """
+                SELECT u.no_unit, u.jenis_unit, u.kategori, t.no_surat_tugas, t.destination, t.driver_nama, t.status as trip_status
+                FROM master.m_unit u
+                LEFT JOIN LATERAL (
+                    SELECT no_surat_tugas, destination, driver_nama, status
+                    FROM fleet.trip
+                    WHERE unit_id = u.id
+                    ORDER BY tgl_trip DESC, id DESC
+                    LIMIT 1
+                ) t ON TRUE
+                WHERE u.is_active = TRUE
+                ORDER BY u.no_unit ASC
+                LIMIT 15
+            """
+            res_units = await db.execute(text(q_units))
+            sample_lines = []
+            for u in res_units.mappings().all():
+                trip_info = f" (Trip: {u['destination'] or '-'})" if u["no_surat_tugas"] else ""
+                sample_lines.append(f"  • {u['no_unit']} | {u['jenis_unit'] or u['kategori']}{trip_info}")
+
+            lines = [
+                f"📡 [MODE DATABASE] Layanan live GPS EasyGo sedang offline/tidak terjangkau.",
+                f"Berikut data registrasi armada PT BCS Logistics dari Database:",
+                f"• Total Terdaftar : {total} unit",
+                f"• Unit Aktif      : {aktif} unit",
+                f"• Unit Non-Aktif  : {non_aktif} unit",
+                "",
+                "📊 Kategori Armada Aktif Terbanyak:",
+                *cat_lines,
+                "",
+                "🚛 Sample Unit Aktif Terdaftar:",
+                *sample_lines,
+                "",
+                "💡 Catatan: Posisi koordinat real-time dan speedometer GPS akan otomatis aktif saat backend GPS (go-map) tersambung."
+            ]
+            return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Gagal mengambil data GPS maupun database armada: {str(e)}"
+
+
+async def _fallback_unit_detail_from_database(nopol: str) -> str:
+    """
+    Fallback untuk mencari unit di master.m_unit PostgreSQL jika GPS offline atau nopol tidak ada di GPS.
+    """
+    nopol_clean = nopol.replace(" ", "").upper()
+    try:
+        async with async_session() as db:
+            q = """
+                SELECT 
+                    u.id, u.no_unit, u.jenis_unit, u.asset_group, u.kategori, u.is_active,
+                    t.no_surat_tugas, t.customer, t.cargo, t.origin, t.destination, 
+                    t.driver_nama, t.status as trip_status, t.tgl_trip
+                FROM master.m_unit u
+                LEFT JOIN LATERAL (
+                    SELECT no_surat_tugas, customer, cargo, origin, destination, driver_nama, status, tgl_trip
+                    FROM fleet.trip
+                    WHERE unit_id = u.id
+                    ORDER BY tgl_trip DESC, id DESC
+                    LIMIT 1
+                ) t ON TRUE
+                WHERE REPLACE(UPPER(u.no_unit), ' ', '') LIKE :nopol_like
+                   OR UPPER(u.no_unit) = :nopol_exact
+                LIMIT 1
+            """
+            res = await db.execute(text(q), {"nopol_like": f"%{nopol_clean}%", "nopol_exact": nopol.strip().upper()})
+            unit = res.mappings().first()
+
+            if not unit:
+                return f"❌ Unit dengan nomor polisi / nomor unit '{nopol}' tidak ditemukan di sistem GPS maupun master database armada PT BCS Logistics."
+
+            status_str = "AKTIF (Siap Operasi)" if unit["is_active"] else "NON-AKTIF / MAINTENANCE"
+            
+            trip_str = "Belum ada riwayat trip"
+            if unit["no_surat_tugas"]:
+                trip_str = (
+                    f"Surat Tugas : {unit['no_surat_tugas']}\n"
+                    f"  Tanggal     : {unit['tgl_trip']}\n"
+                    f"  Driver      : {unit['driver_nama'] or '-'}\n"
+                    f"  Customer    : {unit['customer'] or '-'}\n"
+                    f"  Muatan      : {unit['cargo'] or '-'}\n"
+                    f"  Rute        : {unit['origin'] or '-'} ➔ {unit['destination'] or '-'}\n"
+                    f"  Status Trip : {unit['trip_status']}"
+                )
+
+            return (
+                f"🚛 DETAIL UNIT (MASTER DATABASE BCS): {unit['no_unit']}\n"
+                f"Status Operasi : {status_str}\n"
+                f"Tipe Kendaraan : {unit['jenis_unit'] or '-'}\n"
+                f"Kategori       : {unit['kategori'] or '-'}\n"
+                f"Asset Group    : {unit['asset_group'] or '-'}\n"
+                f"\n📋 Riwayat Penugasan / Trip Terakhir:\n"
+                f"  {trip_str}\n\n"
+                f"📡 Catatan: Telematika posisi GPS live sedang offline sehingga koordinat lintang/bujur dan kecepatan tidak dapat ditampilkan."
+            )
+    except Exception as e:
+        return f"❌ Gagal mencari unit di database: {str(e)}"
+
+
 # ── Tool Functions ────────────────────────────────────────────────
 
 async def get_all_fleet_status() -> str:
@@ -131,8 +264,8 @@ async def get_all_fleet_status() -> str:
     Mengambil status seluruh armada: nopol, driver, status, kecepatan, lokasi.
     """
     records, err = await _fetch_fleet_data()
-    if err:
-        return f"❌ Gagal mengambil data GPS: {err}"
+    if err or not records:
+        return await _fallback_fleet_from_database()
 
     parsed = [_parse_vehicle(v) for v in records]
     # Deduplikasi berdasarkan nopol
@@ -177,8 +310,8 @@ async def get_unit_detail(nopol: str) -> str:
     Mengambil detail lengkap satu unit berdasarkan nomor polisi (nopol).
     """
     records, err = await _fetch_fleet_data()
-    if err:
-        return f"❌ Gagal mengambil data GPS: {err}"
+    if err or not records:
+        return await _fallback_unit_detail_from_database(nopol)
 
     nopol_clean = nopol.replace(" ", "").upper()
     match = None
@@ -189,7 +322,7 @@ async def get_unit_detail(nopol: str) -> str:
             break
 
     if not match:
-        return f"❌ Unit dengan nopol '{nopol}' tidak ditemukan. Coba cek ulang nomor polisinya."
+        return await _fallback_unit_detail_from_database(nopol)
 
     u = _parse_vehicle(match)
     spd = f"{u['kecepatan_kmh']} km/h" if u["kecepatan_kmh"] > 0 else "Sedang diam"
