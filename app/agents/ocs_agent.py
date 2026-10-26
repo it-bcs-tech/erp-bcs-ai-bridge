@@ -370,6 +370,8 @@ async def process_ocs_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
                 tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
             else:
                 tool_content = str(result)
+                if len(tool_content) > 3500:
+                    tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
 
             conversation.append({
                 "role": "tool",
@@ -401,13 +403,15 @@ async def process_ocs_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
                 tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
             else:
                 tool_content = str(result)
+                if len(tool_content) > 3500:
+                    tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
 
             conversation.append({
                 "role": "user",
                 "content": f"[System: Hasil dari {func_name}]:\n{tool_content}",
             })
 
-    # Step 3: Stream Final Answer
+    # Step 3: Stream Final Answer (tanpa tools definition agar hemat token & fokus generate respon)
     if has_tool_call:
         stream_success = False
         for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
@@ -415,8 +419,6 @@ async def process_ocs_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
                 stream = await client.chat.completions.create(
                     model=model_name,
                     messages=conversation,
-                    tools=OCS_TOOLS,
-                    tool_choice="auto",
                     temperature=0.3,
                     stream=True,
                 )

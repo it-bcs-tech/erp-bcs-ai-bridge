@@ -16,7 +16,7 @@ from sqlalchemy import text
 from app.database import async_session
 
 
-async def get_daily_operational_plan(plan_date: str | None = None, contract_id: str | None = None, limit: int = 10) -> str:
+async def get_daily_operational_plan(plan_date: str | None = None, contract_id: str | None = None, limit: int | None = 10) -> str:
     """
     Mengambil rencana harian operasional (target ritase, tonase, dan kebutuhan unit) per kontrak/pelanggan.
     Args:
@@ -25,9 +25,10 @@ async def get_daily_operational_plan(plan_date: str | None = None, contract_id: 
         limit: Batas jumlah data yang ditampilkan (default: 10).
     """
     try:
+        safe_limit = max(1, min(int(limit or 10), 30))
         async with async_session() as db:
             conditions = []
-            params = {"limit": limit}
+            params = {"limit": safe_limit}
 
             if plan_date:
                 conditions.append("plan_date = :plan_date")
@@ -85,7 +86,7 @@ async def get_active_trips_and_dispatch(
     status: str | None = None,
     driver_name: str | None = None,
     destination: str | None = None,
-    limit: int = 15
+    limit: int | None = 15
 ) -> str:
     """
     Mengambil data penugasan trip armada, status surat tugas (ST), muatan, rute, dan pengemudi.
@@ -96,9 +97,10 @@ async def get_active_trips_and_dispatch(
         limit: Batas data yang ditampilkan (default: 15).
     """
     try:
+        safe_limit = max(1, min(int(limit or 15), 30))
         async with async_session() as db:
             conditions = ["t.deleted_at IS NULL"]
-            params = {"limit": limit}
+            params = {"limit": safe_limit}
 
             if status:
                 conditions.append("UPPER(t.status::text) = :status")
@@ -181,9 +183,10 @@ async def get_proof_of_delivery_status(
         limit: Batas data yang ditampilkan (default: 10).
     """
     try:
+        safe_limit = max(1, min(int(limit or 10), 30))
         async with async_session() as db:
             conditions = []
-            params = {"limit": limit}
+            params = {"limit": safe_limit}
 
             if pod_number:
                 conditions.append("pod_number ILIKE :pod_number")
@@ -244,9 +247,10 @@ async def get_monthly_contract_targets(contract_id: str | None = None, limit: in
     Mengambil target tonase bulanan per kontrak pelanggan.
     """
     try:
+        safe_limit = max(1, min(int(limit or 10), 30))
         async with async_session() as db:
             conditions = []
-            params = {"limit": limit}
+            params = {"limit": safe_limit}
 
             if contract_id:
                 conditions.append("contract_id ILIKE :contract_id")
@@ -280,46 +284,98 @@ async def get_monthly_contract_targets(contract_id: str | None = None, limit: in
         return f"❌ Gagal mengambil target bulanan kontrak: {str(e)}"
 
 
-async def get_customer_and_partner_info(search: str | None = None, limit: int = 10) -> str:
+async def get_customer_and_partner_info(search: str | None = None, limit: int | None = 10) -> str:
     """
-    Mencari informasi pelanggan logistik (kode kustomer, nama, tier, nomor kontak, dan alamat).
+    Mencari informasi pelanggan logistik (jumlah customer, komposisi tier, kontak, dan alamat).
     """
+    safe_limit = max(1, min(int(limit or 10), 20))
     try:
         async with async_session() as db:
-            conditions = ["is_active = TRUE"]
-            params = {"limit": limit}
-
-            if search:
-                conditions.append("(nama_kustomer ILIKE :search OR kode_kustomer ILIKE :search)")
-                params["search"] = f"%{search.strip()}%"
-
-            where_clause = "WHERE " + " AND ".join(conditions)
-
-            q = f"""
-                SELECT id, kode_kustomer, nama_kustomer, contact_person, phone, tier, alamat
+            # 1. Total statistics
+            q_stats = """
+                SELECT 
+                    COUNT(*) as total_all,
+                    COUNT(*) FILTER (WHERE is_active = TRUE) as total_active,
+                    COUNT(*) FILTER (WHERE is_active = FALSE) as total_inactive
                 FROM master.m_customer
-                {where_clause}
-                ORDER BY nama_kustomer ASC
-                LIMIT :limit
             """
-            res = await db.execute(text(q), params)
-            rows = res.mappings().all()
+            res_stats = await db.execute(text(q_stats))
+            stats = res_stats.mappings().first()
 
-            if not rows:
-                return f"ℹ️ Tidak ditemukan data pelanggan dengan kata kunci '{search}'."
+            # 2. Tier breakdown
+            q_tier = """
+                SELECT COALESCE(NULLIF(tier, ''), 'Standard') as tier_name, COUNT(*) as cnt
+                FROM master.m_customer
+                WHERE is_active = TRUE
+                GROUP BY 1
+                ORDER BY cnt DESC
+                LIMIT 5
+            """
+            res_tier = await db.execute(text(q_tier))
+            tier_rows = res_tier.mappings().all()
 
             lines = [
-                f"🏢 INFORMASI PELANGGAN LOGISTIK (MASTER CUSTOMER):",
-                ""
+                "🏢 MASTER & STATISTIK PELANGGAN (CUSTOMER BCS LOGISTICS):",
+                f"• Total Pelanggan Terdaftar : {stats['total_all']} customer",
+                f"• Pelanggan Aktif          : {stats['total_active']} customer",
+                f"• Pelanggan Non-Aktif      : {stats['total_inactive']} customer",
             ]
-            for r in rows:
-                cp = r["contact_person"] or "-"
-                ph = r["phone"] or "-"
-                tier = f" [Tier {r['tier']}]" if r["tier"] else ""
-                lines.append(
-                    f"  • {r['nama_kustomer']}{tier} (Kode: {r['kode_kustomer']})\n"
-                    f"    Kontak: {cp} ({ph}) | Alamat: {r['alamat'] or '-'}"
-                )
+
+            if tier_rows:
+                tier_str = ", ".join([f"{t['tier_name']}: {t['cnt']}" for t in tier_rows])
+                lines.append(f"• Komposisi Tier           : {tier_str}")
+
+            lines.append("")
+
+            # 3. Query customer list
+            conditions = ["is_active = TRUE"]
+            params = {"limit": safe_limit}
+
+            if search and search.strip():
+                clean_search = search.strip()
+                conditions.append("(nama_kustomer ILIKE :search OR kode_kustomer ILIKE :search)")
+                params["search"] = f"%{clean_search}%"
+                where_clause = "WHERE " + " AND ".join(conditions)
+
+                q_count = f"SELECT COUNT(*) FROM master.m_customer {where_clause}"
+                matched_count = (await db.execute(text(q_count), params)).scalar()
+
+                q_list = f"""
+                    SELECT kode_kustomer, nama_kustomer, contact_person, phone, tier, alamat
+                    FROM master.m_customer
+                    {where_clause}
+                    ORDER BY nama_kustomer ASC
+                    LIMIT :limit
+                """
+                res_list = await db.execute(text(q_list), params)
+                rows = res_list.mappings().all()
+
+                if not rows:
+                    lines.append(f"ℹ️ Tidak ditemukan data pelanggan dengan kata kunci pencarian '{search}'.")
+                else:
+                    lines.append(f"📋 Hasil Pencarian Pelanggan '{search}' (Menampilkan {len(rows)} dari {matched_count} ditemukan):")
+                    for r in rows:
+                        cp = r["contact_person"] or "-"
+                        ph = r["phone"] or "-"
+                        tier = f" [Tier {r['tier']}]" if r["tier"] else ""
+                        lines.append(f"  • {r['nama_kustomer']}{tier} (Kode: {r['kode_kustomer']}) | CP: {cp} ({ph})")
+            else:
+                # Preview sample top customers
+                q_sample = f"""
+                    SELECT kode_kustomer, nama_kustomer, contact_person, phone, tier
+                    FROM master.m_customer
+                    WHERE is_active = TRUE
+                    ORDER BY id ASC
+                    LIMIT :limit
+                """
+                res_sample = await db.execute(text(q_sample), {"limit": min(safe_limit, 8)})
+                sample_rows = res_sample.mappings().all()
+
+                lines.append(f"📋 Contoh/Daftar Pelanggan Aktif (Sampel {len(sample_rows)} dari {stats['total_active']} aktif):")
+                for r in sample_rows:
+                    tier = f" [{r['tier']}]" if r["tier"] else ""
+                    lines.append(f"  • {r['nama_kustomer']}{tier} (Kode: {r['kode_kustomer']})")
+                lines.append("\n💡 Untuk melihat kontak/alamat customer tertentu, sebutkan nama PT atau kode kustomernya.")
 
             return "\n".join(lines)
     except Exception as e:
