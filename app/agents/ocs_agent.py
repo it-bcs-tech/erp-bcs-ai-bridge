@@ -311,7 +311,7 @@ OCS_TOOLS = [
             "name": "search_database_tables",
             "description": (
                 "Cari nama tabel di database PostgreSQL yang cocok dengan kata kunci tertentu. "
-                "Gunakan jika Anda mencari tabel terkait data baru (misal: 'rute', 'target', 'driver').",
+                "Gunakan jika Anda mencari tabel terkait data baru (misal: 'rute', 'target', 'driver')."
             ),
             "parameters": {
                 "type": "object",

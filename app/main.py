@@ -29,6 +29,10 @@ from app.routers.fms_chat import router as fms_chat_router
 from app.routers.ocs_chat import router as ocs_chat_router
 from app.routers.dms_chat import router as dms_chat_router
 from app.routers.maintenance_chat import router as maintenance_chat_router
+from app.routers.finance_chat import router as finance_chat_router
+from app.routers.ga_chat import router as ga_chat_router
+from app.routers.qhse_chat import router as qhse_chat_router
+from app.routers.marketing_chat import router as marketing_chat_router
 from app.routers.anomaly import router as anomaly_router
 from app.routers.dispatch import router as dispatch_router
 from app.routers.maintenance import router as maintenance_router
@@ -93,6 +97,10 @@ app.include_router(ocs_chat_router, prefix="/ocs", tags=["OCS Chat"])
 app.include_router(fms_chat_router, prefix="/fms", tags=["FMS Chat"])
 app.include_router(dms_chat_router, prefix="/dms", tags=["DMS Chat"])
 app.include_router(maintenance_chat_router, prefix="/maintenance", tags=["Maintenance Chat (MARIS)"])
+app.include_router(finance_chat_router, prefix="/finance", tags=["Finance Chat (FINA)"])
+app.include_router(ga_chat_router, prefix="/ga", tags=["General Affairs Chat (GAMA)"])
+app.include_router(qhse_chat_router, prefix="/qhse", tags=["QHSE Chat (QISHA)"])
+app.include_router(marketing_chat_router, prefix="/marketing", tags=["Marketing Chat (MARKO)"])
 app.include_router(anomaly_router, prefix="/fms", tags=["FMS Intelligence"])
 app.include_router(dispatch_router, prefix="/fms", tags=["FMS Dispatch Intelligence"])
 app.include_router(maintenance_router, prefix="/fms", tags=["FMS Maintenance Intelligence"])

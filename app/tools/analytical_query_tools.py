@@ -30,7 +30,7 @@ FORBIDDEN_KEYWORDS = [
 # Peta ringkas tabel inti ERP BCS untuk disuntikkan ke prompt
 ERP_CORE_SCHEMA_MAP = """
 [MASTER DATA]
-- master.m_unit: id (bigint), no_unit (varchar, plat nomor cth: 'A9357TY', 'A9138R'), jenis_unit, asset_group, kategori, is_active
+- master.m_unit: id (bigint), no_unit (varchar plat nomor cth: 'A9357TY', 'A9138R'), jenis_unit, asset_group, kategori, is_active
 - master.m_karyawan: id, payroll_id (varchar cth: '2301.4045'), nama, jabatan, departemen, status_karyawan
 - master.m_customer: id, customer_code, customer_name, customer_type (PLATINUM/GOLD/SILVER/STANDARD), is_active
 - master.m_materials: id, material_code, name, model, brand, part_no, uom, standard_price, stock
@@ -40,7 +40,7 @@ ERP_CORE_SCHEMA_MAP = """
 [MAINTENANCE & WORKSHOP (BENGKEL)]
 - fleet.work_orders: id, wo_no, wo_date, unit_id (relasi ke no_unit m_unit), mechanic_id (payroll_id karyawan), problem, cause, keluhan_driver, conclusion, status (OPEN, PROSES, READY_FOR_REINSPECTION, DISPENSATION_ACTIVE, CLOSED), status_reason, maint_category
 - fleet.vehicle_inspections: id, inspection_no, unit_id (nopol), driver_id, status (APPROVED, REJECTED, NEEDS_REPAIR), odometer, notes
-- fleet.tires: id, serial_number, brand, size_spec, pattern_type, current_tread_depth_mm (numeric, <= 3.0 mm dinyatakan KRITIS), original_tread_depth_mm, status (MOUNTED, SPARE_STOCK, RETREADING, SCRAP), current_unit_id, current_position, total_km, cost_per_km
+- fleet.tires: id, serial_number, brand, size_spec, pattern_type, current_tread_depth_mm (numeric, <= 3.0 mm KRITIS), original_tread_depth_mm, status (MOUNTED, SPARE_STOCK, RETREADING, SCRAP), current_unit_id, current_position, total_km, cost_per_km
 - fleet.maintenance_dn_header: id, dn_no, dn_date, target_unit, wo_no, note, user_group, picked_by, received_by
 - fleet.maintenance_dn_detail: id, dn_no, material_id (relasi material_code), qty_request, qty_supply, qty_actual, price, total
 
@@ -50,9 +50,31 @@ ERP_CORE_SCHEMA_MAP = """
 - operations.contract_monthly_targets: id, contract_id, period_month (1-12), period_year, monthly_tonnage_target, monthly_ritase_target, total_units_required
 - operations.proof_of_delivery: id, trip_id, pod_number, received_date, receiver_name, status
 
-[FINANCE & INVOICING]
+[FINANCE & INVOICING & KASIR]
 - finance.invoice: id, invoice_number, customer_id, issue_date, due_date, total_amount, paid_amount, status
 - finance.dn_header: id, dn_number, trip_id, sj_number, delivery_date, status
+- finance.cash_advance: id, ca_number, employee_id, amount, purpose, status
+- finance.kasir_cash_ledger: id, transaction_date, direction (IN/OUT), amount, category, description, recorded_by
+
+[GENERAL AFFAIRS & FASILITAS]
+- ga.carpool_requests: id, car_id, requester_name, department, destination, purpose, use_date, return_date, status (PENDING, APPROVED, REJECTED, COMPLETED)
+- ga.cars: id, plate_number, brand, model, status, mileage_km
+- ga.spd_requests: id, employee_id, department, destination, start_date, end_date, purpose, total_budget, status
+- ga.stationery_requests: id, request_number, requester_name, department, request_date, status
+- ga.facility_bookings: id, room_id, booked_by, department, start_time, end_time, purpose, status
+- ga.fleet_legal_permits: id, unit_id, permit_type (KIR, STNK, IZIN_TRAYEK), permit_number, expiry_date, renewal_cost, status
+
+[QHSE (K3 & MUTU)]
+- qhse.incidents: id, incident_date, incident_type, severity (LOW, MEDIUM, HIGH, FATAL), location, description, root_cause, corrective_action, status
+- qhse.safety_briefings: id, briefing_date, topic, leader_name, location, total_participants
+- qhse.proactive_reports: id, report_date, hazard_type, reported_by, location, action_taken, status
+- qhse.apd_distributions: id, employee_id, apd_type, distribution_date, qty, condition
+- qhse.customer_complaints: id, complaint_date, customer_id, category, description, resolution, status
+
+[MARKETING & SALES]
+- marketing.sales_order: id, so_number, so_date, customer_id, total_amount, target_tonnage, status
+- marketing.contract: id, contract_number, customer_id, start_date, end_date, target_tonnage, delivered_tonnage, status
+- marketing.deals: id, deal_name, customer_id, deal_stage, estimated_value, closing_date
 """
 
 
