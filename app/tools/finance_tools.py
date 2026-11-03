@@ -17,6 +17,23 @@ from sqlalchemy import text
 from app.database import async_session
 
 
+def _parse_date_or_dt(val: str | None) -> tuple[datetime | None, date | None]:
+    """Helper untuk mem-parsing string tanggal ke datetime dan date aman untuk asyncpg."""
+    if not val or not str(val).strip():
+        return None, None
+    s = str(val).strip()
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt, dt.date()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt, dt.date()
+    except Exception:
+        return None, None
+
+
 async def get_finance_overview() -> str:
     """
     Mengambil ringkasan data keuangan, piutang invoice, UJO driver, dan mutasi kasir terkini:
@@ -97,14 +114,18 @@ async def get_finance_overview() -> str:
         return f"❌ Gagal mengambil ringkasan keuangan: {str(e)}"
 
 
-async def get_invoices(status: str | None = None, limit: int | None = 10) -> str:
+async def get_invoices(
+    status: str | None = None,
+    keyword: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    created_by: str | None = None,
+    limit: int | None = 15
+) -> str:
     """
-    Mengambil daftar invoice / faktur penagihan pelanggan.
-    Args:
-        status: Status invoice ('PAID', 'POSTED', 'DRAFT', 'OPEN').
-        limit: Batas data (default: 10, max: 25).
+    Mengambil daftar invoice / faktur penagihan pelanggan lengkap dengan filter tanggal dan pembuat faktur.
     """
-    safe_limit = max(1, min(int(limit or 10), 25))
+    safe_limit = max(1, min(int(limit or 15), 30))
     try:
         async with async_session() as db:
             conditions = []
@@ -114,15 +135,39 @@ async def get_invoices(status: str | None = None, limit: int | None = 10) -> str
                 conditions.append("UPPER(status::text) = :status")
                 params["status"] = status.strip().upper()
 
+            if keyword and keyword.strip():
+                conditions.append("(invoice_number ILIKE :kw OR reference ILIKE :kw OR po_spk_number ILIKE :kw)")
+                params["kw"] = f"%{keyword.strip()}%"
+
+            if date_from and str(date_from).strip():
+                dt_from, d_from = _parse_date_or_dt(date_from)
+                if dt_from:
+                    conditions.append("(date >= :date_from_d OR created_at >= :date_from_dt)")
+                    params["date_from_d"] = d_from
+                    params["date_from_dt"] = dt_from
+
+            if date_to and str(date_to).strip():
+                dt_to, d_to = _parse_date_or_dt(date_to)
+                if dt_to:
+                    dt_to_end = datetime(dt_to.year, dt_to.month, dt_to.day, 23, 59, 59)
+                    conditions.append("(date <= :date_to_d OR created_at <= :date_to_dt)")
+                    params["date_to_d"] = d_to
+                    params["date_to_dt"] = dt_to_end
+
+            if created_by and str(created_by).strip():
+                conditions.append("created_by ILIKE :created_by")
+                params["created_by"] = f"%{str(created_by).strip()}%"
+
             where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
             q = f"""
                 SELECT 
                     id, invoice_number, type, date, due_date, currency, 
-                    subtotal, tax_amount, total_amount, status, reference, notes
+                    subtotal, tax_amount, total_amount, status, reference, notes,
+                    created_at, created_by
                 FROM finance.invoice
                 {where_clause}
-                ORDER BY date DESC NULLS LAST, id DESC
+                ORDER BY COALESCE(date::timestamp, created_at) DESC NULLS LAST, id DESC
                 LIMIT :limit
             """
             res = await db.execute(text(q), params)
@@ -131,15 +176,18 @@ async def get_invoices(status: str | None = None, limit: int | None = 10) -> str
             if not rows:
                 return "ℹ️ Tidak ditemukan data invoice yang sesuai kriteria."
 
-            lines = [f"📑 DAFTAR INVOICE KEUANGAN ({len(rows)} ditemukan):"]
+            lines = [f"📑 DAFTAR INVOICE KEUANGAN ({len(rows)} data ditemukan):"]
             for r in rows:
                 d_str = r["date"].strftime("%d %b %Y") if isinstance(r["date"], (date, datetime)) else str(r["date"] or "-")
                 due_str = r["due_date"].strftime("%d %b %Y") if isinstance(r["due_date"], (date, datetime)) else str(r["due_date"] or "-")
+                c_str = r["created_at"].strftime("%d/%m/%Y %H:%M") if isinstance(r["created_at"], (date, datetime)) else "-"
+                creator = r["created_by"] or "Finance Dept"
                 tot = float(r["total_amount"] or 0)
                 curr = r["currency"] or "IDR"
                 lines.append(
                     f"• [{r['status']}] No: {r['invoice_number']} | Tgl: {d_str} (Jatuh Tempo: {due_str})\n"
-                    f"  Nilai: {curr} {tot:,.2f} | Tipe: {r['type'] or 'Standard'} | Ref: {r['reference'] or '-'}"
+                    f"  Nilai: {curr} {tot:,.2f} | Tipe: {r['type'] or 'Standard'} | Ref: {r['reference'] or '-'}\n"
+                    f"  Dibuat: {c_str} (Oleh: {creator})"
                 )
             return "\n".join(lines)
     except Exception as e:

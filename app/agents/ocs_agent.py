@@ -117,13 +117,25 @@ OCS_TOOLS = [
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Nama driver untuk filter.",
                     },
-                    "unit_id": {
+                    "keyword": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Nomor plat/nopol unit jika mencari trip armada tertentu.",
+                        "description": "Kata kunci pencarian (surat tugas, nopol, tujuan, pelanggan, muatan).",
+                    },
+                    "date_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal awal trip atau waktu dibuat (format 'YYYY-MM-DD', misal: '2026-10-26').",
+                    },
+                    "date_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal akhir trip atau waktu dibuat (format 'YYYY-MM-DD').",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama dispatcher atau user pembuat trip.",
                     },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas jumlah data (default 10, max 25).",
+                        "description": "Batas jumlah data (default 15, max 30).",
                     },
                 },
             },

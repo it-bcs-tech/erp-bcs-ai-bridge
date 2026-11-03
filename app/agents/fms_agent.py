@@ -25,6 +25,7 @@ from app.tools.fms_tools import (
     get_fleet_summary_for_monitoring,
     get_driver_trip_stats,
     get_unit_trip_stats,
+    search_registered_units,
 )
 from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
 from app.tools.analytical_query_tools import (
@@ -222,6 +223,12 @@ async def _execute_fms_tool(tool_call) -> str:
             return await get_driver_trip_stats(driver_name=args.get("driver_name"))
         elif func_name == "get_unit_trip_stats":
             return await get_unit_trip_stats(nopol=args.get("nopol", ""))
+        elif func_name == "search_registered_units":
+            return await search_registered_units(**args)
+        elif func_name == "execute_analytical_sql":
+            return await execute_analytical_sql(**args)
+        elif func_name == "inspect_table_schema":
+            return await inspect_table_schema(**args)
         elif func_name == "generate_chart_image":
             return await generate_chart_image(**args)
         else:

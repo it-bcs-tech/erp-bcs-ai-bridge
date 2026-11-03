@@ -17,6 +17,23 @@ from sqlalchemy import text
 from app.database import async_session
 
 
+def _parse_date_or_dt(val: str | None) -> tuple[datetime | None, date | None]:
+    """Helper untuk mem-parsing string tanggal ke datetime dan date aman untuk asyncpg."""
+    if not val or not str(val).strip():
+        return None, None
+    s = str(val).strip()
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt, dt.date()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt, dt.date()
+    except Exception:
+        return None, None
+
+
 async def get_ga_overview() -> str:
     """
     Mengambil ringkasan data General Affairs terkini:
@@ -96,38 +113,66 @@ async def get_ga_overview() -> str:
         return f"❌ Gagal mengambil ringkasan GA: {str(e)}"
 
 
-async def get_carpool_schedule(date_str: str | None = None, requester: str | None = None, limit: int | None = 10) -> str:
+async def get_carpool_schedule(
+    date_str: str | None = None,
+    requester: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    created_by: str | None = None,
+    keyword: str | None = None,
+    limit: int | None = 15
+) -> str:
     """
-    Mengambil jadwal peminjaman kendaraan dinas (carpool).
-    Args:
-        date_str: Tanggal penggunaan format 'YYYY-MM-DD'.
-        requester: Nama peminjam atau NIK.
-        limit: Batas data (default: 10, max: 25).
+    Mengambil jadwal peminjaman kendaraan dinas (carpool) lengkap dengan filter rentang waktu dan pembuat data.
     """
-    safe_limit = max(1, min(int(limit or 10), 25))
+    safe_limit = max(1, min(int(limit or 15), 30))
     try:
         async with async_session() as db:
             conditions = []
             params = {"limit": safe_limit}
 
             if date_str and date_str.strip():
-                conditions.append("use_date = :use_date")
+                conditions.append("cp.use_date = :use_date")
                 params["use_date"] = date_str.strip()
 
             if requester and requester.strip():
-                conditions.append("(requester_name ILIKE :req OR requester_nik ILIKE :req)")
+                conditions.append("(cp.requester_name ILIKE :req OR cp.requester_nik ILIKE :req)")
                 params["req"] = f"%{requester.strip()}%"
+
+            if keyword and keyword.strip():
+                conditions.append("(cp.carpool_number ILIKE :kw OR cp.destination ILIKE :kw OR cp.reason ILIKE :kw)")
+                params["kw"] = f"%{keyword.strip()}%"
+
+            if date_from and str(date_from).strip():
+                dt_from, d_from = _parse_date_or_dt(date_from)
+                if dt_from:
+                    conditions.append("(cp.use_date >= :date_from_d OR cp.created_at >= :date_from_dt)")
+                    params["date_from_d"] = d_from
+                    params["date_from_dt"] = dt_from
+
+            if date_to and str(date_to).strip():
+                dt_to, d_to = _parse_date_or_dt(date_to)
+                if dt_to:
+                    dt_to_end = datetime(dt_to.year, dt_to.month, dt_to.day, 23, 59, 59)
+                    conditions.append("(cp.use_date <= :date_to_d OR cp.created_at <= :date_to_dt)")
+                    params["date_to_d"] = d_to
+                    params["date_to_dt"] = dt_to_end
+
+            if created_by and str(created_by).strip():
+                conditions.append("cp.created_by ILIKE :created_by")
+                params["created_by"] = f"%{str(created_by).strip()}%"
 
             where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
             q = f"""
                 SELECT 
                     cp.carpool_number, cp.use_date, cp.end_date, cp.requester_name, 
-                    cp.destination, cp.reason, cp.city_type, c.car_name, c.police_number
+                    cp.destination, cp.reason, cp.city_type, cp.created_at, cp.created_by,
+                    c.car_name, c.police_number
                 FROM ga.carpool_requests cp
                 LEFT JOIN ga.cars c ON cp.car_id = c.id
                 {where_clause}
-                ORDER BY cp.use_date DESC, cp.id DESC
+                ORDER BY COALESCE(cp.use_date::timestamp, cp.created_at) DESC NULLS LAST, cp.id DESC
                 LIMIT :limit
             """
             res = await db.execute(text(q), params)
@@ -136,14 +181,16 @@ async def get_carpool_schedule(date_str: str | None = None, requester: str | Non
             if not rows:
                 return "ℹ️ Tidak ditemukan data jadwal peminjaman kendaraan dinas."
 
-            lines = [f"🚗 JADWAL KENDARAAN DINAS (CARPOOL) ({len(rows)} ditemukan):"]
+            lines = [f"🚗 JADWAL KENDARAAN DINAS (CARPOOL) ({len(rows)} data ditemukan):"]
             for r in rows:
                 d_str = r["use_date"].strftime("%d %b %Y") if isinstance(r["use_date"], (date, datetime)) else str(r["use_date"] or "-")
+                c_str = r["created_at"].strftime("%d/%m/%Y %H:%M") if isinstance(r["created_at"], (date, datetime)) else "-"
+                creator = r["created_by"] or "GA Admin"
                 mobil = f"{r['car_name'] or 'Mobil Dinas'} ({r['police_number'] or '-'})"
                 lines.append(
                     f"• [{d_str}] {r['carpool_number']} — {r['requester_name']}\n"
                     f"  Tujuan: {r['destination']} ({r['city_type'] or 'Lokal'}) | Armada: {mobil}\n"
-                    f"  Keperluan: {r['reason'] or '-'}"
+                    f"  Keperluan: {r['reason'] or '-'} | Dibuat: {c_str} (Oleh: {creator})"
                 )
             return "\n".join(lines)
     except Exception as e:

@@ -16,6 +16,23 @@ from sqlalchemy import text
 from app.database import async_session
 
 
+def _parse_date_or_dt(val: str | None) -> tuple[datetime | None, date | None]:
+    """Helper untuk mem-parsing string tanggal ke datetime dan date aman untuk asyncpg."""
+    if not val or not str(val).strip():
+        return None, None
+    s = str(val).strip()
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt, dt.date()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt, dt.date()
+    except Exception:
+        return None, None
+
+
 async def get_daily_operational_plan(plan_date: str | None = None, contract_id: str | None = None, limit: int | None = 10) -> str:
     """
     Mengambil rencana harian operasional (target ritase, tonase, dan kebutuhan unit) per kontrak/pelanggan.
@@ -86,15 +103,15 @@ async def get_active_trips_and_dispatch(
     status: str | None = None,
     driver_name: str | None = None,
     destination: str | None = None,
+    keyword: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    created_by: str | None = None,
     limit: int | None = 15
 ) -> str:
     """
-    Mengambil data penugasan trip armada, status surat tugas (ST), muatan, rute, dan pengemudi.
-    Args:
-        status: Status trip ('SCHEDULED', 'RUNNING', 'COMPLETED', 'CANCELED').
-        driver_name: Nama driver yang dicari.
-        destination: Kota atau lokasi tujuan.
-        limit: Batas data yang ditampilkan (default: 15).
+    Mengambil data penugasan trip armada, status surat tugas (ST), muatan, rute, dan pengemudi
+    dengan filter tanggal (tgl_trip / created_at) dan pembuat trip (created_by).
     """
     try:
         safe_limit = max(1, min(int(limit or 15), 30))
@@ -111,6 +128,28 @@ async def get_active_trips_and_dispatch(
             if destination:
                 conditions.append("(t.destination ILIKE :destination OR t.customer ILIKE :destination)")
                 params["destination"] = f"%{destination.strip()}%"
+            if keyword and keyword.strip():
+                conditions.append("(t.no_surat_tugas ILIKE :kw OR t.driver_nama ILIKE :kw OR t.customer ILIKE :kw OR t.cargo ILIKE :kw OR u.no_unit ILIKE :kw)")
+                params["kw"] = f"%{keyword.strip()}%"
+
+            if date_from and str(date_from).strip():
+                dt_from, d_from = _parse_date_or_dt(date_from)
+                if dt_from:
+                    conditions.append("(t.tgl_trip >= :date_from_d OR t.created_at >= :date_from_dt)")
+                    params["date_from_d"] = d_from
+                    params["date_from_dt"] = dt_from
+
+            if date_to and str(date_to).strip():
+                dt_to, d_to = _parse_date_or_dt(date_to)
+                if dt_to:
+                    dt_to_end = datetime(dt_to.year, dt_to.month, dt_to.day, 23, 59, 59)
+                    conditions.append("(t.tgl_trip <= :date_to_d OR t.created_at <= :date_to_dt)")
+                    params["date_to_d"] = d_to
+                    params["date_to_dt"] = dt_to_end
+
+            if created_by and str(created_by).strip():
+                conditions.append("t.created_by ILIKE :created_by")
+                params["created_by"] = f"%{str(created_by).strip()}%"
 
             where_clause = "WHERE " + " AND ".join(conditions)
 
@@ -132,11 +171,12 @@ async def get_active_trips_and_dispatch(
                 SELECT 
                     t.id, t.no_surat_tugas, t.unit_id, t.driver_nama, t.customer, t.cargo,
                     t.origin, t.destination, t.status::text as status_txt, t.tgl_trip, t.distance_km, t.fuel_used_l,
+                    t.created_at, t.created_by,
                     u.no_unit
                 FROM fleet.trip t
                 LEFT JOIN master.m_unit u ON t.unit_id = u.id
                 {where_clause}
-                ORDER BY t.tgl_trip DESC, t.id DESC
+                ORDER BY COALESCE(t.tgl_trip::timestamp, t.created_at) DESC NULLS LAST, t.id DESC
                 LIMIT :limit
             """
             res = await db.execute(text(q), params)
@@ -149,18 +189,21 @@ async def get_active_trips_and_dispatch(
                 f"🚛 DATA DISPATCH & TRIP OPERASIONAL ARMADA:",
                 f"📊 Ringkasan Status Global: Total {row_stats['total']} Trip (Scheduled: {row_stats['scheduled']}, Running: {row_stats['running']}, Completed: {row_stats['completed']})",
                 "",
-                f"Daftar Penugasan Trip (Terbaru {len(rows)} data):"
+                f"Daftar Penugasan Trip ({len(rows)} data ditemukan):"
             ]
 
             for r in rows:
                 t_date = r["tgl_trip"].strftime("%d/%m/%Y") if isinstance(r["tgl_trip"], (date, datetime)) else str(r["tgl_trip"])
+                c_date = r["created_at"].strftime("%d/%m/%Y %H:%M") if isinstance(r["created_at"], (date, datetime)) else "-"
+                creator = r["created_by"] or "Dispatcher"
                 unit_str = r["no_unit"] or (f"Unit ID {r['unit_id']}" if r["unit_id"] else "Belum Assign Unit")
                 driver_str = r["driver_nama"] or "Belum Ditugaskan"
                 cargo_str = f" | Muatan: {r['cargo']}" if r["cargo"] else ""
                 lines.append(
                     f"  • [{r['status_txt']}] {r['no_surat_tugas']} ({t_date})\n"
                     f"    Armada: {unit_str} | Driver: {driver_str}{cargo_str}\n"
-                    f"    Rute: {r['origin'] or '-'} ➔ {r['destination'] or '-'}"
+                    f"    Rute: {r['origin'] or '-'} ➔ {r['destination'] or '-'}\n"
+                    f"    Dibuat: {c_date} (Oleh: {creator})"
                 )
 
             return "\n".join(lines)

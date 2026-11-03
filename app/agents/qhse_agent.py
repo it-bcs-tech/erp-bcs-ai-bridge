@@ -90,9 +90,25 @@ QHSE_TOOLS = [
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Tingkat keparahan: 'HIGH', 'MEDIUM', atau 'LOW'.",
                     },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci pencarian insiden (nomor, lokasi, deskripsi).",
+                    },
+                    "date_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal awal insiden/pembuatan (format YYYY-MM-DD).",
+                    },
+                    "date_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal akhir insiden/pembuatan (format YYYY-MM-DD).",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama pelapor/pembuat laporan insiden.",
+                    },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
                     },
                 },
             },
@@ -113,9 +129,25 @@ QHSE_TOOLS = [
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Level resiko: 'HIGH', 'MEDIUM', atau 'LOW'.",
                     },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci pencarian (nomor laporan, lokasi, deskripsi, pelapor).",
+                    },
+                    "date_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal awal observasi/pembuatan (format YYYY-MM-DD).",
+                    },
+                    "date_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal akhir observasi/pembuatan (format YYYY-MM-DD).",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama pengamat atau user pembuat laporan.",
+                    },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
                     },
                 },
             },
@@ -136,9 +168,25 @@ QHSE_TOOLS = [
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Status keluhan: 'OPEN', 'INVESTIGATING', atau 'CLOSED'.",
                     },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci pencarian keluhan (nomor komplain, customer, deskripsi).",
+                    },
+                    "date_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal awal keluhan/pembuatan (format YYYY-MM-DD).",
+                    },
+                    "date_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal akhir keluhan/pembuatan (format YYYY-MM-DD).",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama staf/pembuat data keluhan.",
+                    },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
                     },
                 },
             },

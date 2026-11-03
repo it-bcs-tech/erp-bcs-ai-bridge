@@ -87,11 +87,27 @@ FINANCE_TOOLS = [
                 "properties": {
                     "status": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Status invoice: 'PAID', 'POSTED', 'DRAFT', atau 'OPEN'.",
+                        "description": "Status invoice: 'PAID', 'POSTED', 'DRAFT', 'OPEN'.",
+                    },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nomor invoice, referensi PO, atau SPK.",
+                    },
+                    "date_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal awal terbit atau dibuat (format 'YYYY-MM-DD', misal '2026-10-26').",
+                    },
+                    "date_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal akhir terbit atau dibuat (format 'YYYY-MM-DD').",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama pembuat invoice.",
                     },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
                     },
                 },
             },

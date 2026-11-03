@@ -34,6 +34,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _parse_date_or_dt(val: str | None) -> tuple[datetime | None, date | None]:
+    """Helper untuk mem-parsing string tanggal ke datetime dan date aman untuk asyncpg."""
+    if not val or not str(val).strip():
+        return None, None
+    s = str(val).strip()
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt, dt.date()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt, dt.date()
+    except Exception:
+        return None, None
+
+
 # ── Query umum dengan JOIN ke tabel referensi ────────────────
 
 BASE_EMPLOYEE_SELECT = """
@@ -57,7 +74,10 @@ BASE_EMPLOYEE_SELECT = """
         k.marital_status,
         k.email,
         k.telp1,
-        k.point_of_hire
+        k.point_of_hire,
+        k.created_at,
+        k.created_by,
+        k.date_created
     FROM master.m_karyawan k
     LEFT JOIN master.m_title t ON k.title = t.title_code
     LEFT JOIN master.m_dept d ON k.dept_id = d.dept_code
@@ -210,36 +230,90 @@ async def get_employees_by_status(db: AsyncSession, status: str | None = None) -
         return await get_employee_count(db)
 
 
-async def get_employee_list(db: AsyncSession, limit: int = 15) -> str:
-    """Ambil daftar karyawan aktif (dengan limit)."""
-    query = text(f"""
-        {BASE_EMPLOYEE_SELECT}
-        WHERE k.aktif = 'Y'
-        ORDER BY k.nama_karyawan
-        LIMIT :limit
-    """)
-    result = await db.execute(query, {"limit": limit})
-    rows = result.mappings().all()
+async def get_employee_list(
+    db: AsyncSession,
+    keyword: Optional[str] = None,
+    department: Optional[str] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    created_by: Optional[str] = None,
+    sort_by: Optional[str] = "newest",
+    limit: Optional[int] = 20,
+) -> str:
+    """Ambil daftar karyawan aktif dengan filter kata kunci, departemen, status, rentang tanggal masuk/pembuatan data, dan pembuat data."""
+    safe_limit = max(1, min(int(limit or 20), 50))
+    try:
+        conditions = ["k.aktif = 'Y'"]
+        params = {"limit": safe_limit}
 
-    if not rows:
-        return "Tidak ada data karyawan."
+        if keyword and keyword.strip():
+            conditions.append("(k.nama_karyawan ILIKE :kw OR k.payroll_id ILIKE :kw OR t.title ILIKE :kw)")
+            params["kw"] = f"%{keyword.strip()}%"
 
-    # Hitung total
-    count_query = text("SELECT COUNT(*) FROM master.m_karyawan WHERE aktif = 'Y'")
-    count_result = await db.execute(count_query)
-    total = count_result.scalar() or 0
+        if department and department.strip():
+            conditions.append("(d.dept_name ILIKE :dept OR k.dept_id ILIKE :dept)")
+            params["dept"] = f"%{department.strip()}%"
 
-    lines = [f"📋 DAFTAR KARYAWAN AKTIF (menampilkan {len(rows)} dari {total} total):"]
-    for row in rows:
-        lines.append(
-            f"• {row['nama_karyawan']} ({row['payroll_id']})\n"
-            f"  {row['jabatan']} | {row['departemen']} | {row['lokasi']} | {row['status']}"
-        )
+        if status and status.strip():
+            conditions.append("k.status ILIKE :st")
+            params["st"] = f"%{status.strip()}%"
 
-    if total > limit:
-        lines.append(f"\n⚠️ Hanya menampilkan {limit} karyawan pertama dari total {total}.")
+        if date_from and str(date_from).strip():
+            dt_from, d_from = _parse_date_or_dt(date_from)
+            if dt_from:
+                conditions.append("(k.created_at >= :date_from_dt OR k.date_created >= :date_from_dt OR k.tgl_masuk >= :date_from_d)")
+                params["date_from_dt"] = dt_from
+                params["date_from_d"] = d_from
 
-    return "\n".join(lines)
+        if date_to and str(date_to).strip():
+            dt_to, d_to = _parse_date_or_dt(date_to)
+            if dt_to:
+                dt_to_end = datetime(dt_to.year, dt_to.month, dt_to.day, 23, 59, 59)
+                conditions.append("(k.created_at <= :date_to_dt OR k.date_created <= :date_to_dt OR k.tgl_masuk <= :date_to_d)")
+                params["date_to_dt"] = dt_to_end
+                params["date_to_d"] = d_to
+
+        if created_by and str(created_by).strip():
+            conditions.append("k.created_by ILIKE :created_by")
+            params["created_by"] = f"%{str(created_by).strip()}%"
+
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+        order_clause = "ORDER BY COALESCE(k.created_at, k.date_created, k.tgl_masuk::timestamp) DESC NULLS LAST, k.id DESC"
+        if sort_by == "name":
+            order_clause = "ORDER BY k.nama_karyawan ASC"
+        elif sort_by == "tgl_masuk":
+            order_clause = "ORDER BY k.tgl_masuk DESC NULLS LAST"
+
+        query = text(f"""
+            {BASE_EMPLOYEE_SELECT}
+            {where_clause}
+            {order_clause}
+            LIMIT :limit
+        """)
+        result = await db.execute(query, params)
+        rows = result.mappings().all()
+
+        if not rows:
+            return "ℹ️ Tidak ditemukan data karyawan aktif dengan kriteria tersebut."
+
+        lines = [f"📋 DAFTAR KARYAWAN ({len(rows)} data ditemukan):"]
+        for r in rows:
+            tgl_masuk = r['tgl_masuk'].strftime('%d %b %Y') if r['tgl_masuk'] else '-'
+            c_val = r.get('created_at') or r.get('date_created')
+            c_str = c_val.strftime('%d/%m/%Y %H:%M') if isinstance(c_val, (date, datetime)) else '-'
+            creator = r.get('created_by') or 'HR Admin'
+            lines.append(
+                f"• {r['nama_karyawan']} (ID: {r['payroll_id']})\n"
+                f"  Jabatan: {r['jabatan']} | Dept: {r['departemen']} | Lokasi: {r['lokasi']}\n"
+                f"  Status: {r['status']} | Tgl Masuk: {tgl_masuk}\n"
+                f"  Dibuat di Sistem: {c_str} (Oleh: {creator})"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"get_employee_list error: {e}")
+        return f"INFO DATABASE: Terjadi kesalahan saat mengambil daftar karyawan: {str(e)}"
 
 
 async def get_employees_by_location(db: AsyncSession, location: str) -> str:

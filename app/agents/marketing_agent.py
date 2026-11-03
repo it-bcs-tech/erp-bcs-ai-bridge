@@ -26,6 +26,7 @@ from app.tools.marketing_tools import (
     get_marketing_overview,
     get_sales_orders,
     get_commercial_contracts,
+    get_marketing_deals,
 )
 from app.tools.analytical_query_tools import (
     execute_analytical_sql,
@@ -77,19 +78,36 @@ MARKETING_TOOLS = [
         "function": {
             "name": "get_sales_orders",
             "description": (
-                "Ambil daftar Sales Order (SO) logistik: nomor SO, nama pelanggan, jenis muatan, berat tonase, nilai tarif, dan status. "
-                "Gunakan saat pengguna menanyakan 'daftar sales order', 'order muatan aktif', 'cek SO customer X'."
+                "Ambil daftar Sales Order (SO) logistik lengkap: nomor SO, nama pelanggan, jenis muatan, berat tonase, nilai tarif, "
+                "tanggal pembuatan/pemuatan (created_from/created_to), pembuat data (created_by), dan status. "
+                "Gunakan saat pengguna menanyakan 'daftar sales order', 'order baru dibuat 1 minggu terakhir', 'cek SO customer X'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Status SO: 'CONFIRMED', 'DELIVERED', 'COMPLETED', atau 'DRAFT'.",
+                        "description": "Status SO: 'CONFIRMED', 'DELIVERED', 'COMPLETED', 'DISPATCHED', 'DRAFT'.",
+                    },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci pencarian: nomor SO, nama pelanggan, atau jenis muatan.",
+                    },
+                    "created_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal awal pembuatan/pemuatan SO (format 'YYYY-MM-DD', misal '2026-10-26').",
+                    },
+                    "created_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal akhir pembuatan/pemuatan SO (format 'YYYY-MM-DD', misal '2026-11-02').",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama user pembuat data SO (misal 'superhyperadmin', 'admin').",
                     },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
                     },
                 },
             },
@@ -100,19 +118,75 @@ MARKETING_TOOLS = [
         "function": {
             "name": "get_commercial_contracts",
             "description": (
-                "Ambil data kontrak komersial pengiriman logistik: nilai kontrak, pelanggan, periode masa berlaku, target tonase, dan realisasi muatan. "
-                "Gunakan saat pengguna menanyakan 'daftar kontrak', 'kontrak aktif', 'progres pemenuhan tonase kontrak'."
+                "Ambil data kontrak komersial logistik: nilai kontrak, pelanggan, target tonase, realisasi tonase muatan, "
+                "tanggal pembuatan kontrak (created_from/created_to), pembuat kontrak (created_by), dan status masa berlaku. "
+                "Gunakan saat pengguna menanyakan 'daftar kontrak', 'kontrak baru dibuat', 'progres tonase kontrak'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Status kontrak: 'ACTIVE', 'COMPLETED', atau 'EXPIRED'.",
+                        "description": "Status kontrak: 'ACTIVE', 'COMPLETED', 'EXPIRED'.",
+                    },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci nomor kontrak, nama pelanggan, atau catatan.",
+                    },
+                    "created_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal awal pembuatan kontrak (format 'YYYY-MM-DD').",
+                    },
+                    "created_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal akhir pembuatan kontrak (format 'YYYY-MM-DD').",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama user pembuat kontrak.",
                     },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_marketing_deals",
+            "description": (
+                "Ambil data prospek peluang bisnis / pipeline deals penjualan komersial: nama calon klien, PIC, potensi nilai tarif dan tonase, target closing, pembuat deal, dan status konversi. "
+                "Gunakan saat pengguna menanyakan 'pipeline deals', 'prospek baru', 'peluang penjualan'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "stage": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tahap deal komersial.",
+                    },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci nama perusahaan prospek atau kontak person.",
+                    },
+                    "created_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal awal pembuatan deal (format 'YYYY-MM-DD').",
+                    },
+                    "created_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal akhir pembuatan deal (format 'YYYY-MM-DD').",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama user pembuat prospek deal.",
+                    },
+                    "limit": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "description": "Batas data (default: 15).",
                     },
                 },
             },
@@ -236,6 +310,8 @@ async def _execute_marketing_tool(tool_call) -> str:
             return await get_sales_orders(**args)
         elif func_name == "get_commercial_contracts":
             return await get_commercial_contracts(**args)
+        elif func_name == "get_marketing_deals":
+            return await get_marketing_deals(**args)
         elif func_name == "execute_analytical_sql":
             return await execute_analytical_sql(**args)
         elif func_name == "inspect_table_schema":

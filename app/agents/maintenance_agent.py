@@ -101,9 +101,25 @@ MAINTENANCE_TOOLS = [
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Kategori servis (misal: 'Regular Repair', 'Corrective Repair (P2H)', 'Periodic Service').",
                     },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci pencarian nomor SPK, problem, keluhan driver, atau kesimpulan.",
+                    },
+                    "created_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal awal pembuatan/pengerjaan SPK (format 'YYYY-MM-DD', misal '2026-10-26').",
+                    },
+                    "created_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal akhir pembuatan/pengerjaan SPK (format 'YYYY-MM-DD').",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama user pembuat SPK.",
+                    },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
                     },
                 },
             },

@@ -260,13 +260,41 @@ HRIS_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_employee_list",
-            "description": "Dapatkan daftar seluruh karyawan aktif dengan batas limit.",
+            "description": "Dapatkan daftar karyawan aktif dengan filter kata kunci, departemen, rentang tanggal masuk atau pembuatan di sistem (created_at), dan pembuat data (created_by).",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Opsional. Kata kunci nama karyawan, NIK/payroll ID, atau jabatan."
+                    },
+                    "department": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Opsional. Nama departemen."
+                    },
+                    "status": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Opsional. Status kepegawaian (PERMANENT, CONTRACT, dll)."
+                    },
+                    "date_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Opsional. Tanggal awal masuk/pembuatan data (format 'YYYY-MM-DD')."
+                    },
+                    "date_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Opsional. Tanggal akhir masuk/pembuatan data (format 'YYYY-MM-DD')."
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Opsional. Nama staf/user HR yang membuat data di sistem."
+                    },
+                    "sort_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Urutan data: 'newest' (terbaru dibuat), 'tgl_masuk' (terbaru masuk), atau 'name'."
+                    },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Opsional. Batas jumlah karyawan yang ditampilkan (default: 15)."
+                        "description": "Batas jumlah karyawan yang ditampilkan (default: 20)."
                     }
                 }
             }
@@ -482,7 +510,17 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
         elif func_name == "get_employees_by_location":
             return await get_employees_by_location(db, location=args.get("location"))
         elif func_name == "get_employee_list":
-            return await get_employee_list(db, limit=args.get("limit") or 20)
+            return await get_employee_list(
+                db,
+                keyword=args.get("keyword"),
+                department=args.get("department"),
+                status=args.get("status"),
+                date_from=args.get("date_from"),
+                date_to=args.get("date_to"),
+                created_by=args.get("created_by"),
+                sort_by=args.get("sort_by") or "newest",
+                limit=args.get("limit") or 20,
+            )
         elif func_name == "get_leave_today":
             return await get_leave_today(db)
         elif func_name == "get_present_today":

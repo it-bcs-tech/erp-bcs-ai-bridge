@@ -19,7 +19,7 @@ Struktur data EasyGo yang relevan:
 """
 
 import httpx
-from datetime import datetime
+from datetime import datetime, date
 from app.config import get_settings
 from app.database import async_session
 from sqlalchemy import text
@@ -32,6 +32,23 @@ settings = get_settings()
 # Di Docker: set GO_MAP_URL=http://erp_go_map:8081/api/fms/live-map di .env
 GO_MAP_URL = settings.go_map_url
 HTTP_TIMEOUT = 10.0  # seconds
+
+
+def _parse_date_or_dt(val: str | None) -> tuple[datetime | None, date | None]:
+    """Helper untuk mem-parsing string tanggal ke datetime dan date aman untuk asyncpg."""
+    if not val or not str(val).strip():
+        return None, None
+    s = str(val).strip()
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt, dt.date()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt, dt.date()
+    except Exception:
+        return None, None
 
 
 # ── Helper: Fetch semua data GPS dari go-map ──────────────────────
@@ -259,7 +276,7 @@ async def _fallback_unit_detail_from_database(nopol: str) -> str:
 
 # ── Tool Functions ────────────────────────────────────────────────
 
-async def get_all_fleet_status() -> str:
+async def get_all_fleet_status(limit: int | None = None) -> str:
     """
     Mengambil status seluruh armada: nopol, driver, status, kecepatan, lokasi.
     """
@@ -356,8 +373,11 @@ async def get_slow_or_stuck_units() -> str:
     - Moving + kecepatan 5-20 km/h = LALU LINTAS PADAT
     """
     records, err = await _fetch_fleet_data()
-    if err:
-        return f"❌ Gagal mengambil data GPS: {err}"
+    if err or not records:
+        return (
+            "📡 [INFO TELEMATIKA] Layanan telematika GPS EasyGo sedang offline/tidak terjangkau.\n"
+            "Data status live (speedometer dan kemacetan) memerlukan koneksi GPS. Saat ini pemantauan beralih ke Database Riwayat Trip OCS."
+        )
 
     parsed = [_parse_vehicle(v) for v in records]
     # Deduplikasi berdasarkan nopol
@@ -443,8 +463,8 @@ async def get_fleet_summary_for_monitoring() -> str:
     Laporan ringkas monitoring: total armada, distribusi status, alert kemacetan.
     """
     records, err = await _fetch_fleet_data()
-    if err:
-        return f"❌ Gagal mengambil data GPS: {err}"
+    if err or not records:
+        return await _fallback_fleet_from_database()
 
     parsed = [_parse_vehicle(v) for v in records]
     total = len(parsed)
@@ -613,3 +633,79 @@ async def get_unit_trip_stats(nopol: str = "") -> str:
             )
         except Exception as e:
             return f"INFO DATABASE: Terjadi kesalahan saat mengambil data trip unit: {str(e)}"
+
+
+
+async def search_registered_units(
+    keyword: str | None = None,
+    kategori: str | None = None,
+    is_active: bool | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    limit: int | None = 20
+) -> str:
+    """
+    Mencari master data armada terdaftar di PT BCS Logistics berdasarkan nopol, kategori, status aktif,
+    atau tanggal pendaftaran/registrasi unit (created_at).
+    """
+    safe_limit = max(1, min(int(limit or 20), 50))
+    try:
+        async with async_session() as db:
+            conditions = []
+            params = {"limit": safe_limit}
+
+            if keyword and keyword.strip():
+                clean_kw = keyword.replace(" ", "").upper()
+                conditions.append("(REPLACE(UPPER(no_unit), ' ', '') LIKE :kw_clean OR jenis_unit ILIKE :kw)")
+                params["kw_clean"] = f"%{clean_kw}%"
+                params["kw"] = f"%{keyword.strip()}%"
+
+            if kategori and kategori.strip():
+                conditions.append("kategori ILIKE :kat")
+                params["kat"] = f"%{kategori.strip()}%"
+
+            if is_active is not None:
+                conditions.append("is_active = :is_act")
+                params["is_act"] = is_active
+
+            if created_from and str(created_from).strip():
+                dt_from, d_from = _parse_date_or_dt(created_from)
+                if dt_from:
+                    conditions.append("(created_at >= :created_from_dt OR updated_at >= :created_from_dt)")
+                    params["created_from_dt"] = dt_from
+
+            if created_to and str(created_to).strip():
+                dt_to, d_to = _parse_date_or_dt(created_to)
+                if dt_to:
+                    dt_to_end = datetime(dt_to.year, dt_to.month, dt_to.day, 23, 59, 59)
+                    conditions.append("(created_at <= :created_to_dt OR updated_at <= :created_to_dt)")
+                    params["created_to_dt"] = dt_to_end
+
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+            q = f"""
+                SELECT id, no_unit, jenis_unit, asset_group, kategori, is_active, created_at, updated_at
+                FROM master.m_unit
+                {where_clause}
+                ORDER BY created_at DESC NULLS LAST, no_unit ASC
+                LIMIT :limit
+            """
+            res = await db.execute(text(q), params)
+            rows = res.mappings().all()
+
+            if not rows:
+                return f"ℹ️ Tidak ditemukan armada terdaftar yang sesuai kriteria pencarian '{keyword or ''}'."
+
+            lines = [f"🚛 MASTER DATA ARMADA TERDAFTAR ({len(rows)} unit ditemukan):"]
+            for r in rows:
+                status_str = "🟢 Aktif" if r["is_active"] else "🔴 Non-Aktif"
+                c_str = r["created_at"].strftime("%d/%m/%Y %H:%M") if isinstance(r["created_at"], (date, datetime)) else "-"
+                u_str = r["updated_at"].strftime("%d/%m/%Y %H:%M") if isinstance(r["updated_at"], (date, datetime)) else "-"
+                lines.append(
+                    f"• {r['no_unit']} [{status_str}]\n"
+                    f"  Tipe/Kategori: {r['jenis_unit'] or '-'} ({r['kategori'] or 'Armada'}) | Asset Group: {r['asset_group'] or '-'}\n"
+                    f"  Tgl Registrasi: {c_str} | Terakhir Diperbarui: {u_str}"
+                )
+            return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Gagal mencari data armada terdaftar: {str(e)}"

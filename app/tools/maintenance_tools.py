@@ -16,6 +16,23 @@ from sqlalchemy import text
 from app.database import async_session
 
 
+def _parse_date_or_dt(val: str | None) -> tuple[datetime | None, date | None]:
+    """Helper untuk mem-parsing string tanggal ke datetime dan date aman untuk asyncpg."""
+    if not val or not str(val).strip():
+        return None, None
+    s = str(val).strip()
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt, dt.date()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt, dt.date()
+    except Exception:
+        return None, None
+
+
 async def get_maintenance_overview() -> str:
     """
     Mengambil ringkasan data perawatan armada bengkel terkini:
@@ -112,17 +129,16 @@ async def get_work_orders(
     status: str | None = None,
     unit_id: str | None = None,
     maint_category: str | None = None,
-    limit: int | None = 10
+    keyword: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    created_by: str | None = None,
+    limit: int | None = 15
 ) -> str:
     """
-    Mengambil daftar Surat Perintah Kerja (SPK / Work Orders) di bengkel.
-    Args:
-        status: Status SPK ('OPEN', 'PROSES', 'READY_FOR_REINSPECTION', 'DISPENSATION_ACTIVE', 'CLOSED').
-        unit_id: Nomor polisi atau nomor unit armada (misal: 'A9357TY' atau 'A 9138 R').
-        maint_category: Kategori perawatan ('Regular Repair', 'Corrective Repair (P2H)', 'Periodic Service', dsb.).
-        limit: Batas data yang ditampilkan (default: 10, max: 25).
+    Mengambil daftar Surat Perintah Kerja (SPK / Work Orders) di bengkel lengkap dengan filter waktu dan pembuat data.
     """
-    safe_limit = max(1, min(int(limit or 10), 25))
+    safe_limit = max(1, min(int(limit or 15), 30))
     try:
         async with async_session() as db:
             conditions = []
@@ -145,18 +161,39 @@ async def get_work_orders(
                 conditions.append("wo.maint_category ILIKE :maint_category")
                 params["maint_category"] = f"%{maint_category.strip()}%"
 
+            if keyword and keyword.strip():
+                conditions.append("(wo.wo_no ILIKE :kw OR wo.problem ILIKE :kw OR wo.keluhan_driver ILIKE :kw OR wo.conclusion ILIKE :kw)")
+                params["kw"] = f"%{keyword.strip()}%"
+
+            if created_from and str(created_from).strip():
+                dt_from, d_from = _parse_date_or_dt(created_from)
+                if dt_from:
+                    conditions.append("(wo.wo_date >= :created_from_dt OR wo.created_at >= :created_from_dt)")
+                    params["created_from_dt"] = dt_from
+
+            if created_to and str(created_to).strip():
+                dt_to, d_to = _parse_date_or_dt(created_to)
+                if dt_to:
+                    dt_to_end = datetime(dt_to.year, dt_to.month, dt_to.day, 23, 59, 59)
+                    conditions.append("(wo.wo_date <= :created_to_dt OR wo.created_at <= :created_to_dt)")
+                    params["created_to_dt"] = dt_to_end
+
+            if created_by and str(created_by).strip():
+                conditions.append("wo.created_by ILIKE :created_by")
+                params["created_by"] = f"%{str(created_by).strip()}%"
+
             where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
             q = f"""
                 SELECT 
                     wo.id, wo.wo_no, wo.wo_date, wo.unit_id, wo.status, wo.problem, 
                     wo.cause, wo.keluhan_driver, wo.conclusion, wo.maint_category,
-                    wo.mechanic_id, wo.kilometer, wo.promised_date,
+                    wo.mechanic_id, wo.kilometer, wo.promised_date, wo.created_at, wo.created_by,
                     COALESCE(k.nama_karyawan, wo.mechanic_id) as nama_mekanik
                 FROM fleet.work_orders wo
                 LEFT JOIN master.m_karyawan k ON k.payroll_id = wo.mechanic_id
                 {where_clause}
-                ORDER BY wo.wo_date DESC, wo.id DESC
+                ORDER BY COALESCE(wo.wo_date, wo.created_at) DESC NULLS LAST, wo.id DESC
                 LIMIT :limit
             """
             res = await db.execute(text(q), params)
@@ -168,12 +205,14 @@ async def get_work_orders(
                 return f"ℹ️ Tidak ditemukan data Work Order (SPK){filter_str}."
 
             lines = [
-                f"📋 DAFTAR WORK ORDER / SPK BENGKEL (Menampilkan {len(rows)} data):",
+                f"📋 DAFTAR WORK ORDER / SPK BENGKEL ({len(rows)} data ditemukan):",
                 ""
             ]
 
             for r in rows:
-                d_str = r["wo_date"].strftime("%d %b %Y") if isinstance(r["wo_date"], (date, datetime)) else str(r["wo_date"])
+                d_str = r["wo_date"].strftime("%d %b %Y") if isinstance(r["wo_date"], (date, datetime)) else str(r["wo_date"] or "-")
+                c_str = r["created_at"].strftime("%d/%m/%Y %H:%M") if isinstance(r["created_at"], (date, datetime)) else "-"
+                creator = r["created_by"] or "Workshop Admin"
                 p_date = f" | Est. Selesai: {r['promised_date'].strftime('%d %b %Y')}" if r["promised_date"] and isinstance(r["promised_date"], (date, datetime)) else ""
                 prob = r["problem"] or r["keluhan_driver"] or "Pemeriksaan berkala"
                 mekanik = r["nama_mekanik"] or "Belum ditugaskan"
@@ -181,8 +220,8 @@ async def get_work_orders(
 
                 lines.append(
                     f"  • [{r['status']}] No. SPK: {r['wo_no']} | Unit: {r['unit_id']}{km_info}\n"
-                    f"    Kategori: {r['maint_category'] or 'Umum'} | Tanggal: {d_str}{p_date}\n"
-                    f"    Mekanik : {mekanik}\n"
+                    f"    Kategori: {r['maint_category'] or 'Umum'} | Tanggal SPK: {d_str}{p_date}\n"
+                    f"    Mekanik : {mekanik} | Dibuat: {c_str} (Oleh: {creator})\n"
                     f"    Kendala : {prob}"
                 )
                 if r["conclusion"]:

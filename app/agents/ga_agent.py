@@ -79,8 +79,8 @@ GA_TOOLS = [
         "function": {
             "name": "get_carpool_schedule",
             "description": (
-                "Ambil jadwal dan daftar peminjaman kendaraan dinas operasional (carpool) berdasarkan tanggal atau nama peminjam. "
-                "Gunakan saat pengguna menanyakan 'jadwal mobil dinas', 'siapa yang pinjam mobil Avanza', 'mobil dinas yang siap'."
+                "Ambil jadwal dan daftar peminjaman kendaraan dinas operasional (carpool) berdasarkan tanggal, rentang waktu, pemohon, atau pembuat data. "
+                "Gunakan saat pengguna menanyakan 'jadwal mobil dinas', 'siapa yang pinjam mobil Avanza', 'peminjaman mobil minggu ini'."
             ),
             "parameters": {
                 "type": "object",
@@ -89,13 +89,29 @@ GA_TOOLS = [
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Tanggal peminjaman format 'YYYY-MM-DD'.",
                     },
+                    "date_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal awal peminjaman atau pembuatan data format 'YYYY-MM-DD'.",
+                    },
+                    "date_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Tanggal akhir peminjaman atau pembuatan data format 'YYYY-MM-DD'.",
+                    },
                     "requester": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Nama karyawan atau NIK pemohon.",
                     },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama staf/user pembuat pengajuan carpool.",
+                    },
+                    "keyword": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Kata kunci pencarian (nomor carpool, tujuan, keperluan).",
+                    },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default: 10, max: 25).",
+                        "description": "Batas data yang ditampilkan (default: 15, max: 30).",
                     },
                 },
             },
