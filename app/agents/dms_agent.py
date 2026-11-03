@@ -3,11 +3,13 @@ DMS Agent — DIMAS
 ─────────────────────────────────────────────────────────────────
 Document Intelligence & Management Archival System
 
-DIMAS adalah asisten AI khusus modul Document Management System (DMS) PT BCS Logistics.
+DIMAS adalah asisten AI resmi khusus modul Document Management System (DMS) di PT BCS Logistics.
 Memiliki akses langsung ke database arsip dan legalitas:
 - Dokumen Legalitas & Arsip (dms.documents)
 - Peringatan Jatuh Tempo / Expiry Alert (STNK, KIR, BPKB, SIM, Izin B3, Sertifikat)
 - Lokasi Fisik Penyimpanan Berkas (dms.m_filing_location)
+- Kueri Analitis & Text-to-SQL Dinamis Aman (execute_analytical_sql)
+- Inspeksi Skema Database (inspect_table_schema, search_database_tables)
 - Pembuatan Grafik & Visualisasi Statistik (generate_chart_image)
 """
 
@@ -24,21 +26,24 @@ from app.tools.dms_tools import (
     get_expiring_documents,
     get_document_detail,
 )
+from app.tools.analytical_query_tools import (
+    execute_analytical_sql,
+    inspect_table_schema,
+    search_database_tables,
+    ERP_CORE_SCHEMA_MAP,
+)
 
-# ── Fallback candidate models jika model utama limit/429/413 ─────────
 CANDIDATE_MODELS = [
     settings.llm_model,
-    "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
 ]
 CANDIDATE_MODELS = list(dict.fromkeys([m for m in CANDIDATE_MODELS if m]))
 
 
 def prune_conversation_history(messages: list[dict], max_history: int = 6) -> list[dict]:
-    """
-    Memangkas riwayat obrolan agar tidak memicu TPM/TPD rate limit.
-    """
+    """Memangkas riwayat obrolan agar tidak memicu TPM/TPD rate limit."""
     if len(messages) <= max_history:
         return messages
 
@@ -70,15 +75,16 @@ DMS_TOOLS = [
         "function": {
             "name": "search_documents",
             "description": (
-                "Cari dokumen arsip berdasarkan nomor dokumen, nopol kendaraan, nama driver, judul dokumen, atau tipe entitas. "
-                "Gunakan jika pengguna menanyakan dokumen spesifik (contoh: 'dokumen truk A9255R', 'SIM driver Rudi', 'akta notaris', 'kontrak Indocement')."
+                "Cari dokumen arsip berdasarkan nomor dokumen, nopol kendaraan, nama driver, judul dokumen, tipe dokumen (KIR/STNK/SIM), "
+                "tanggal pembuatan (created_at/rentang tanggal), atau nama user pembuat dokumen (created_by). "
+                "Gunakan jika pengguna menanyakan dokumen spesifik, dokumen baru dibuat, atau dokumen berdasarkan pembuatnya."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "keyword": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Kata kunci pencarian (misal: 'A9255R', 'SIM B2', 'KIR', nama driver, atau nomor dokumen).",
+                        "description": "Kata kunci pencarian (misal: 'A9255R', 'SIM B2', 'KIR', nama driver, judul, atau nomor dokumen).",
                     },
                     "entity_type": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -86,11 +92,27 @@ DMS_TOOLS = [
                     },
                     "doc_type": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Tipe dokumen spesifik (misal: 'Uji Berkala / KIR', 'STNK', 'SIM Pengemudi').",
+                        "description": "Tipe dokumen spesifik (misal: 'Uji Berkala / KIR', 'STNK', 'SIM A Pengemudi').",
                     },
                     "status": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Status dokumen: 'ACTIVE', 'EXPIRED', 'PENDING'.",
+                    },
+                    "created_from": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal awal pembuatan dokumen (format 'YYYY-MM-DD', misal: '2026-10-26').",
+                    },
+                    "created_to": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Filter tanggal akhir pembuatan dokumen (format 'YYYY-MM-DD', misal: '2026-11-02').",
+                    },
+                    "created_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Nama atau username pembuat dokumen (misal: 'superhyperadmin', 'admin', 'System Migration').",
+                    },
+                    "sort_by": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "'newest' (terbaru dibuat), 'expiry_soon' (segera expired), atau 'title'.",
                     },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
@@ -121,7 +143,7 @@ DMS_TOOLS = [
                     },
                     "limit": {
                         "anyOf": [{"type": "integer"}, {"type": "null"}],
-                        "description": "Batas data yang ditampilkan (default 15).",
+                        "description": "Batas data (default: 15).",
                     },
                 },
             },
@@ -132,35 +154,104 @@ DMS_TOOLS = [
         "function": {
             "name": "get_document_detail",
             "description": (
-                "Ambil rincian lengkap satu dokumen tertentu termasuk tanggal terbit, tanggal jatuh tempo, catatan, dan lokasi penyimpanan fisik rak/lemari."
+                "Lihat informasi lengkap satu dokumen spesifik: tanggal dibuat, pembuat berkas, nomor, masa berlaku, "
+                "metadata JSON, riwayat versi, serta lokasi fisik penyimpanan (lemari/rak arsip)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "doc_number_or_title": {
                         "type": "string",
-                        "description": "Nomor dokumen atau judul lengkap dokumen yang dicari.",
-                    }
+                        "description": "Nomor dokumen atau judul lengkap dokumen.",
+                    },
                 },
                 "required": ["doc_number_or_title"],
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_analytical_sql",
+            "description": (
+                "Jalankan kueri SQL analitis SELECT kustom secara aman ke database PostgreSQL DMS/ERP BCS. "
+                "Gunakan tool ini ketika pengguna meminta agregasi kustom, pengelompokan tanggal pembuatan (created_at), "
+                "filter pembuat dokumen (created_by), atau pencarian arsip kompleks yang memerlukan JOIN atau GROUP BY."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql_query": {
+                        "type": "string",
+                        "description": "Kueri SELECT SQL aman (contoh: 'SELECT doc_number, title, created_at, created_by FROM dms.documents WHERE created_at >= CURRENT_DATE - INTERVAL \'7 days\' ORDER BY created_at DESC LIMIT 15').",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "Tujuan analisis ad-hoc kueri ini.",
+                    },
+                },
+                "required": ["sql_query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_table_schema",
+            "description": "Periksa kolom dan tipe data tabel database PostgreSQL ERP BCS sebelum menjalankan SQL analitis.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "schema_name": {"type": "string", "description": "Nama schema (misal: 'dms', 'master')"},
+                    "table_name": {"type": "string", "description": "Nama tabel (misal: 'documents', 'm_doc_type')"},
+                },
+                "required": ["schema_name", "table_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_database_tables",
+            "description": "Cari nama tabel di database PostgreSQL yang cocok dengan kata kunci tertentu.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "Kata kunci pencarian nama tabel (misal: 'document', 'arsip')"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
 ]
 
+DIMAS_SYSTEM_PROMPT = f"""Anda adalah DIMAS (Document Intelligence & Management Archival System), asisten AI resmi khusus modul Document Management System (DMS) di PT BCS Logistics.
 
-DIMAS_SYSTEM_PROMPT = """Anda adalah DIMAS (Document Intelligence & Management Archival System), asisten AI resmi khusus modul Document Management System (DMS) di PT BCS Logistics.
+KEMAMPUAN UTAMA & AKSES DATA ANDA:
+1. Anda memiliki akses langsung ke database arsip dan legalitas PT BCS Logistics:
+   - Dokumen legalitas armada (STNK, KIR, BPKB, Izin Trayek, B3), lisensi pengemudi (SIM A/B1/B2, sertifikat), kontrak, sertifikat, dan perizinan.
+   - Peringatan dini masa kedaluwarsa berkas (Expiry Alerts).
+   - Lokasi fisik penyimpanan berkas asli di lemari/rak/box arsip.
+2. KEMAMPUAN FILTER TANGGAL PEMBUATAN & PEMBUAT DOKUMEN (TEMPORAL & CREATOR SEARCH):
+   - Tabel `dms.documents` memiliki kolom `created_at` (timestamp pembuatan) dan `created_by` (nama/username pembuat berkas).
+   - Jika pengguna meminta dokumen yang "baru dibuat", dokumen "1 minggu terakhir", dokumen "hari ini / bulan ini", atau dokumen "yang dibuat oleh user tertentu":
+     Gunakan tool `search_documents` dengan parameter `created_from`, `created_to`, dan `created_by`, ATAU gunakan `execute_analytical_sql` dengan klausa `WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'` atau filter sejenis.
+   - DILARANG KERAS mengatakan "sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat dokumen". Anda MEMILIKI AKSES PENUH ke data tersebut!
+3. Jika Anda sudah mendapatkan data dari tool spesifik (`search_documents`, `get_expiring_documents`, atau `execute_analytical_sql`), SEGERA sajikan jawaban final. JANGAN memanggil tool inspeksi skema berulang-ulang tanpa tujuan.
+4. Jika pengguna meminta grafik visualisasi dokumen, panggil tool `generate_chart_image`.
+5. STRATEGI CERDAS PENCARIAN TANGGAL PEMBUATAN:
+   - Jika pengguna meminta dokumen yang "baru dibuat" atau tipe tertentu (misal: KIR, STNK, dll.) namun dalam rentang waktu ketat (misal 7 hari) belum ada entri baru:
+     Tampilkan dokumen-dokumen yang paling baru dibuat di sistem (`ORDER BY created_at DESC LIMIT 10`) lengkap dengan kolom No Dokumen, Judul/Jenis, Tanggal Dibuat (`created_at`), dan Pembuat Dokumen (`created_by`).
+     Jelaskan bahwa itu adalah dokumen-dokumen terbaru yang tersimpan di sistem.
+   - JANGAN PERNAH menyajikan respon kosong jika di database ada data dokumen.
 
-PERAN & TUGAS UTAMA ANDA:
-1. Membantu pengguna memonitor, mencari, dan mengelola lebih dari 5.800 dokumen legalitas perusahaan, legalitas armada (STNK, KIR, BPKB, Izin B3, IBM), lisensi pengemudi (SIM A/B1/B2, sertifikat B3, SIO), kontrak pelanggan/vendor, serta sertifikat tanah dan akta notaris.
-2. Memberikan peringatan dini (Expiry Alert) untuk dokumen yang mendekati tanggal kedaluwarsa agar operasional armada tidak terhenti karena tilang atau izin mati.
-3. Menginformasikan lokasi penyimpanan fisik berkas asli (Lemari, Rak, Binder, Box).
-4. Jika pengguna meminta grafik rekap dokumen, panggil tool `generate_chart_image`.
+PETA SKEMA TABEL ERP (KNOWLEDGE BASE):
+{ERP_CORE_SCHEMA_MAP}
 
-BATASAN KETAT (GUARDRAILS):
-- Anda HANYA menangani dokumen arsip, legalitas, perizinan, dan masa berlaku berkas di modul DMS.
-- Jika ditanya hal di luar DMS seperti nominal gaji karyawan, detail teknis mesin truk yang tidak berhubungan dengan dokumen, atau obrolan acak, tolak dengan sopan dan tegaskan peran Anda sebagai DIMAS.
-- Sajikan jawaban secara profesional, terstruktur rapi dengan tabel atau poin Markdown, dan beri sorotan khusus (badge 🔴 🟡 🟢) untuk status kedaluwarsa.
+STANDAR STRUKTUR JAWABAN ANDA:
+1. **Ringkasan Langsung (Direct Answer)**: Jawaban lugas atas kebutuhan pengguna.
+2. **Tabel Bukti Dokumen (Markdown Table)**: Tampilkan No Dokumen, Judul/Jenis, Tanggal Dibuat, Pembuat Berkas, Masa Berlaku, dan Status.
+3. **Rekomendasi Tindakan Arsip**: Langkah tindak lanjut bagi petugas dokumen atau user.
 """
 
 
@@ -183,6 +274,12 @@ async def _execute_dms_tool(tool_call) -> str:
             return await get_expiring_documents(**args)
         elif func_name == "get_document_detail":
             return await get_document_detail(**args)
+        elif func_name == "execute_analytical_sql":
+            return await execute_analytical_sql(**args)
+        elif func_name == "inspect_table_schema":
+            return await inspect_table_schema(**args)
+        elif func_name == "search_database_tables":
+            return await search_database_tables(**args)
         else:
             return f"Error: Tool '{func_name}' tidak dikenali oleh DIMAS."
     except Exception as e:
@@ -212,10 +309,10 @@ async def _stream_filtered(stream) -> AsyncGenerator[str, None]:
                 buffer += token
                 if "</think>" in buffer:
                     is_thinking = False
-                    clean = buffer.split("</think>")[1].lstrip("\n")
-                    if clean:
-                        yield clean
+                    post = buffer.split("</think>", 1)[1].lstrip("\n")
                     buffer = ""
+                    if post:
+                        yield post
 
     if buffer and not is_thinking:
         yield buffer
@@ -223,8 +320,8 @@ async def _stream_filtered(stream) -> AsyncGenerator[str, None]:
 
 async def process_dms_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
     """
-    Main entry point untuk pemrosesan obrolan DIMAS DMS dengan tool calling,
-    conversation pruning, dan multi-model fallback.
+    Main entry point untuk pemrosesan obrolan DIMAS DMS dengan tool calling multi-round
+    dan real-time streaming respon akhir.
     """
     now_str = datetime.now().strftime("%d %B %Y (%H:%M WIB)")
     dynamic_prompt = (
@@ -235,116 +332,82 @@ async def process_dms_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
     clean_messages = prune_conversation_history(messages, max_history=6)
     conversation = [{"role": "system", "content": dynamic_prompt}] + clean_messages
 
-    active_model = settings.llm_model
-    response_message = None
-    last_error = None
+    active_model = CANDIDATE_MODELS[0]
+    MAX_ROUNDS = 4
+    has_streamed = False
 
-    # Step 1: LLM Call dengan auto fallback jika rate limit
-    for model_name in CANDIDATE_MODELS:
-        try:
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=conversation,
-                tools=DMS_TOOLS,
-                tool_choice="auto",
-                temperature=0.1,
-            )
-            response_message = response.choices[0].message
-            active_model = model_name
-            break
-        except Exception as e:
-            err_str = str(e)
-            last_error = e
-            if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str or "too large" in err_str.lower():
-                continue
-            else:
-                yield f"⚠️ DIMAS gagal memproses permintaan: {err_str}"
-                return
+    for round_idx in range(MAX_ROUNDS):
+        resp_msg = None
+        last_error = None
 
-    if response_message is None:
-        yield f"⚠️ Maaf, seluruh model AI sedang mencapai batas kapasitas limit ({str(last_error)}). Silakan tunggu sebentar."
-        return
-
-    has_tool_call = False
-
-    # Step 2: Tangani Tool Calls jika ada
-    if response_message.tool_calls:
-        has_tool_call = True
-        conversation.append(response_message)
-
-        for tool_call in response_message.tool_calls:
-            result = await _execute_dms_tool(tool_call)
-
-            if tool_call.function.name == "generate_chart_image":
-                yield str(result)
-                tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
-            else:
-                tool_content = str(result)
-
-            conversation.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "name": tool_call.function.name,
-                "content": tool_content,
-            })
-    elif response_message.content and "<function=" in response_message.content:
-        has_tool_call = True
-        content = response_message.content
-        conversation.append({"role": "assistant", "content": content})
-
-        for match in re.finditer(r"<function=([^>]+)>(.*?)</function>", content):
-            func_name = match.group(1).strip()
-            args_str = match.group(2).strip()
-
-            class _MockFn:
-                name = func_name
-                arguments = args_str if args_str.startswith("{") else f'{{"keyword": "{args_str}"}}'
-
-            class _MockCall:
-                id = f"call_{func_name}"
-                function = _MockFn()
-
-            result = await _execute_dms_tool(_MockCall())
-
-            if func_name == "generate_chart_image":
-                yield str(result)
-                tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
-            else:
-                tool_content = str(result)
-
-            conversation.append({
-                "role": "user",
-                "content": f"[System: Hasil dari {func_name}]:\n{tool_content}",
-            })
-
-    # Step 3: Stream Final Answer
-    if has_tool_call:
-        stream_success = False
         for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
             try:
-                stream = await client.chat.completions.create(
+                resp = await client.chat.completions.create(
                     model=model_name,
                     messages=conversation,
                     tools=DMS_TOOLS,
                     tool_choice="auto",
-                    temperature=0.3,
-                    stream=True,
+                    temperature=0.1,
                 )
-                async for chunk in _stream_filtered(stream):
-                    yield chunk
-                stream_success = True
+                resp_msg = resp.choices[0].message
+                active_model = model_name
                 break
             except Exception as e:
                 err_str = str(e)
+                last_error = e
                 if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str:
                     continue
                 else:
-                    yield f"\n⚠️ [Stream Error]: {err_str}"
+                    yield f"⚠️ DIMAS gagal memproses permintaan: {err_str}"
                     return
 
-        if not stream_success:
-            yield "\n⚠️ [Kapasitas Model Penuh]: Gagal menghasilkan respons final. Coba beberapa saat lagi."
-    else:
-        if response_message.content:
-            clean = re.sub(r"<think>.*?</think>", "", response_message.content, flags=re.DOTALL).strip()
-            yield clean
+        if resp_msg is None:
+            yield f"⚠️ Maaf, kapasitas model sedang penuh ({str(last_error)}). Silakan coba lagi."
+            return
+
+        if resp_msg.tool_calls:
+            conversation.append(resp_msg)
+            for tool_call in resp_msg.tool_calls:
+                result = await _execute_dms_tool(tool_call)
+
+                if tool_call.function.name == "generate_chart_image":
+                    yield str(result) + "\n\n"
+                    tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
+                else:
+                    tool_content = str(result)
+                    if len(tool_content) > 3500:
+                        tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
+
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": tool_content,
+                })
+            # Lanjut ke putaran berikutnya agar LLM mensintesis jawaban dari hasil tool
+            continue
+        else:
+            # LLM selesai memanggil tool dan menghasilkan respon teks final
+            if resp_msg.content:
+                clean = re.sub(r"<think>.*?</think>", "", resp_msg.content, flags=re.DOTALL).strip()
+                words = clean.split(" ")
+                for i, w in enumerate(words):
+                    yield w + (" " if i < len(words) - 1 else "")
+                    if i % 4 == 0:
+                        import asyncio
+                        await asyncio.sleep(0.01)
+                has_streamed = True
+                return
+            else:
+                break
+
+    if not has_streamed:
+        last_tool_res = ""
+        for m in reversed(conversation):
+            if m.get("role") == "tool" and m.get("content"):
+                last_tool_res = m["content"]
+                break
+        if last_tool_res:
+            yield f"**Hasil Pencarian Dokumen Arsip Terkini:**\n\n{last_tool_res}"
+        else:
+            yield "⚠️ Maaf, tidak ada respon data yang dapat ditampilkan saat ini."

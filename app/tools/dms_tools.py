@@ -92,8 +92,26 @@ async def search_documents(
     entity_type: str | None = None,
     doc_type: str | None = None,
     status: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    created_by: str | None = None,
+    sort_by: str | None = "newest",
     limit: int = 15
 ) -> str:
+    """
+    Mencari dokumen berdasarkan kata kunci, tanggal pembuatan (created_at), nama pembuat (created_by),
+    tipe entitas, atau tipe dokumen.
+    Args:
+        keyword: Kata kunci pencarian (misal: 'SIM', 'STNK', 'KIR', nama driver, atau nomor dokumen).
+        entity_type: Tipe entitas ('FLEET', 'DRIVER', 'PARTNER', 'LAND', 'CORPORATE', 'VENDOR').
+        doc_type: Nama tipe dokumen (misal: 'SIM Pengemudi', 'STNK', 'KIR', 'Uji Berkala').
+        status: Status dokumen ('ACTIVE', 'EXPIRED', 'PENDING', 'ARCHIVED').
+        created_from: Tanggal mulai pembuatan dokumen (format 'YYYY-MM-DD', misal: '2026-10-26').
+        created_to: Tanggal akhir pembuatan dokumen (format 'YYYY-MM-DD', misal: '2026-11-02').
+        created_by: Nama atau username pembuat dokumen (misal: 'superhyperadmin', 'admin').
+        sort_by: Urutan hasil ('newest' / 'created_at_desc', 'expiry_soon', 'title').
+        limit: Batas hasil yang ditampilkan (default: 15).
+    """
     """
     Mencari dokumen berdasarkan kata kunci (nomor dokumen, nama, nopol, driver, atau judul), tipe entitas, atau tipe dokumen.
     Args:
@@ -134,19 +152,37 @@ async def search_documents(
                 conditions.append("UPPER(d.status) = :status")
                 params["status"] = status.strip().upper()
 
+            if created_from and created_from.strip():
+                conditions.append("d.created_at::date >= :created_from::date")
+                params["created_from"] = created_from.strip()
+
+            if created_to and created_to.strip():
+                conditions.append("d.created_at::date <= :created_to::date")
+                params["created_to"] = created_to.strip()
+
+            if created_by and created_by.strip():
+                conditions.append("d.created_by ILIKE :created_by")
+                params["created_by"] = f"%{created_by.strip()}%"
+
             where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+            order_clause = "ORDER BY d.created_at DESC NULLS LAST"
+            if sort_by == "expiry_soon":
+                order_clause = "ORDER BY d.expiry_date ASC NULLS LAST"
+            elif sort_by == "title":
+                order_clause = "ORDER BY d.title ASC"
 
             q = f"""
                 SELECT 
                     d.id, d.doc_number, d.title, d.entity_type, d.issue_date, d.expiry_date,
-                    d.status, d.physical_status,
+                    d.status, d.physical_status, d.created_at, d.created_by,
                     t.name as type_name,
                     fl.name as filing_location_name
                 FROM dms.documents d
                 LEFT JOIN dms.m_doc_type t ON d.doc_type_id = t.id
                 LEFT JOIN dms.m_filing_location fl ON d.filing_location_id = fl.id
                 {where_clause}
-                ORDER BY d.created_at DESC
+                {order_clause}
                 LIMIT :limit
             """
             res = await db.execute(text(q), params)
@@ -178,9 +214,14 @@ async def search_documents(
                 doc_no = r["doc_number"] or "-"
                 type_name = r["type_name"] or r["entity_type"] or "Dokumen"
 
+                created_val = r["created_at"]
+                created_str = created_val.strftime("%d/%m/%Y %H:%M") if created_val else "-"
+                creator_str = r["created_by"] or "System Migration"
+
                 lines.append(
                     f"  • [{type_name}] {r['title']}\n"
-                    f"    No. Dokumen: {doc_no} | Status: {r['status']}\n"
+                    f"    No. Dokumen : {doc_no} | Status: {r['status']}\n"
+                    f"    Dibuat Pada : {created_str} | Pembuat: {creator_str}\n"
                     f"    Masa Berlaku: {exp_label}\n"
                     f"    Lokasi Fisik: {loc_str}\n"
                 )
@@ -268,6 +309,7 @@ async def get_document_detail(doc_number_or_title: str) -> str:
                 SELECT 
                     d.id, d.doc_number, d.title, d.entity_type, d.issue_date, d.expiry_date,
                     d.status, d.physical_status, d.notes, d.metadata, d.file_path,
+                    d.created_at, d.created_by,
                     t.name as type_name, c.name as category_name,
                     fl.name as filing_location_name, fl.description as filing_desc
                 FROM dms.documents d
@@ -285,6 +327,8 @@ async def get_document_detail(doc_number_or_title: str) -> str:
 
             issue_str = doc["issue_date"].strftime("%d %B %Y") if doc["issue_date"] else "-"
             exp_str = doc["expiry_date"].strftime("%d %B %Y") if doc["expiry_date"] else "Permanen / Tidak Terbatas"
+            created_str = doc["created_at"].strftime("%d %B %Y (%H:%M WIB)") if doc["created_at"] else "-"
+            creator_str = doc["created_by"] or "System Migration"
 
             notes_str = f"\nCatatan        : {doc['notes']}" if doc["notes"] else ""
             file_str = f"\nFile Lampiran  : {doc['file_path']}" if doc["file_path"] else ""
@@ -295,6 +339,8 @@ async def get_document_detail(doc_number_or_title: str) -> str:
                 f"Tipe Dokumen   : {doc['type_name'] or '-'}\n"
                 f"Kategori       : {doc['category_name'] or doc['entity_type'] or '-'}\n"
                 f"Status Berkas  : {doc['status']} (Fisik: {doc['physical_status'] or '-'})\n"
+                f"Dibuat Pada    : {created_str}\n"
+                f"Pembuat Dokumen: {creator_str}\n"
                 f"Tanggal Terbit : {issue_str}\n"
                 f"Jatuh Tempo    : {exp_str}\n"
                 f"Lokasi Arsip   : {doc['filing_location_name'] or 'Belum Ditentukan'}\n"

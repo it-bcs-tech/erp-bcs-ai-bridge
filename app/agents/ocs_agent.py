@@ -340,7 +340,7 @@ KEMAMPUAN UTAMA ANDA:
    - Menghitung total target tonase/ritase per rute atau per customer dalam periode tertentu.
    - Mengetahui supir atau rute dengan performa pengiriman tertinggi.
    - Menganalisis risiko keterlambatan pengiriman akibat unit masuk bengkel.
-5. Gunakan tool inspeksi skema (`inspect_table_schema` / `search_database_tables`) jika memerlukan kepastian nama kolom sebelum menjalankan SQL analitis.
+5. PETA SKEMA TABEL ERP (KNOWLEDGE BASE) di bawah ini SUDAH LENGKAP dengan daftar kolom tabel utama. LANGSUNG jalankan `execute_analytical_sql` pada putaran pertama tanpa membuang waktu memanggil `inspect_table_schema` kecuali untuk tabel yang belum ada di daftar skema.
 6. Jika pengguna meminta bagan/grafik, panggil tool `generate_chart_image`.
 
 STANDAR STRUKTUR JAWABAN ANDA:
@@ -352,6 +352,15 @@ Setiap menjawab pertanyaan analitis, sajikan dengan struktur konsultan profesion
 
 PETA SKEMA TABEL ERP (KNOWLEDGE BASE):
 {ERP_CORE_SCHEMA_MAP}
+
+
+## KEMAMPUAN FILTER TANGGAL PEMBUATAN & PEMBUAT DATA (TEMPORAL & CREATOR CAPABILITY):
+- Anda memiliki akses langsung ke database PostgreSQL ERP BCS melalui `execute_analytical_sql`.
+- Setiap tabel transaksi maupun master memiliki kolom audit `created_at` (waktu data dibuat di sistem) dan `created_by` (user pembuat data), serta tanggal transaksi operasional spesifik.
+- Jika pengguna meminta data yang baru dibuat hari ini, 1 minggu terakhir, bulan ini, rentang tanggal tertentu, atau dibuat oleh user/pembuat tertentu:
+  Anda DAPAT dan WAJIB menyajikannya menggunakan kueri SQL analitis (`execute_analytical_sql`) dengan filter `WHERE created_at >= ...` atau `WHERE created_by = ...` atau tanggal transaksi terkait.
+- DILARANG KERAS mengatakan sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat data! Selalu periksa dan gunakan kolom `created_at` dan `created_by`.
+
 
 BATASAN KETAT:
 - JANGAN PERNAH mengatakan "maaf data tidak tersedia" atau "saya tidak punya fitur itu" jika informasi tersebut secara logis dapat dihitung dari tabel database. Gunakan `execute_analytical_sql`!
@@ -426,8 +435,8 @@ async def process_ocs_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
     """
     Orkestrasi alur ReAct Multi-Round ORIS:
     1. Prune riwayat obrolan
-    2. Multi-turn reasoning loop: Model memanggil tools, mengevaluasi hasil, dan memperbaiki jika ada error
-    3. Setelah data lengkap, sintesis jawaban final secara streaming ke pengguna
+    2. Multi-turn reasoning loop untuk evaluasi data analitis
+    3. Real-time word streaming respon final
     """
     pruned_history = prune_conversation_history(messages, max_history=6)
 
@@ -438,93 +447,78 @@ async def process_ocs_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
     conversation.extend(pruned_history)
 
     active_model = CANDIDATE_MODELS[0]
-    MAX_ROUNDS = 4
+    MAX_ROUNDS = 3
+    has_streamed = False
 
     for round_idx in range(MAX_ROUNDS):
-        is_last_round = (round_idx == MAX_ROUNDS - 1)
-        tool_choice = "none" if is_last_round else "auto"
-        tools = None if is_last_round else OCS_TOOLS
+        resp_msg = None
+        last_err = None
 
-        if not is_last_round:
-            resp_msg = None
-            last_err = None
+        for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
+            try:
+                resp = await client.chat.completions.create(
+                    model=model_name,
+                    messages=conversation,
+                    tools=OCS_TOOLS,
+                    tool_choice="auto",
+                    temperature=0.1,
+                )
+                resp_msg = resp.choices[0].message
+                active_model = model_name
+                break
+            except Exception as e:
+                err_str = str(e)
+                last_err = e
+                if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str or "too large" in err_str.lower():
+                    continue
+                else:
+                    yield f"⚠️ ORIS gagal memproses permintaan: {err_str}"
+                    return
 
-            for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
-                try:
-                    resp = await client.chat.completions.create(
-                        model=model_name,
-                        messages=conversation,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        temperature=0.1,
-                    )
-                    resp_msg = resp.choices[0].message
-                    active_model = model_name
-                    break
-                except Exception as e:
-                    err_str = str(e)
-                    last_err = e
-                    if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str or "too large" in err_str.lower():
-                        continue
-                    else:
-                        yield f"⚠️ ORIS gagal memproses permintaan: {err_str}"
-                        return
-
-            if resp_msg is None:
-                yield f"⚠️ Maaf, kapasitas model sedang penuh ({str(last_err)}). Silakan coba lagi."
-                return
-
-            if resp_msg.tool_calls:
-                conversation.append(resp_msg)
-                for tool_call in resp_msg.tool_calls:
-                    result = await _execute_ocs_tool(tool_call)
-
-                    if tool_call.function.name == "generate_chart_image":
-                        yield str(result)
-                        tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
-                    else:
-                        tool_content = str(result)
-                        if len(tool_content) > 3500:
-                            tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
-
-                    conversation.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "content": tool_content,
-                    })
-                continue
-            else:
-                if resp_msg.content:
-                    clean = re.sub(r"<think>.*?</think>", "", resp_msg.content, flags=re.DOTALL).strip()
-                    words = clean.split(" ")
-                    for i, w in enumerate(words):
-                        yield w + (" " if i < len(words) - 1 else "")
-                        if i % 4 == 0:
-                            await asyncio.sleep(0.01)
-                return
-        else:
-            stream_success = False
-            for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
-                try:
-                    stream = await client.chat.completions.create(
-                        model=model_name,
-                        messages=conversation,
-                        temperature=0.3,
-                        stream=True,
-                    )
-                    async for chunk in _stream_filtered(stream):
-                        yield chunk
-                    stream_success = True
-                    break
-                except Exception as e:
-                    err_str = str(e)
-                    if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str:
-                        continue
-                    else:
-                        yield f"\n⚠️ [Stream Error]: {err_str}"
-                        return
-
-            if not stream_success:
-                yield "\n⚠️ Gagal menghasilkan respon final. Silakan coba beberapa saat lagi."
+        if resp_msg is None:
+            yield f"⚠️ Maaf, kapasitas model sedang penuh ({str(last_err)}). Silakan coba lagi."
             return
+
+        if resp_msg.tool_calls:
+            conversation.append(resp_msg)
+            for tool_call in resp_msg.tool_calls:
+                result = await _execute_ocs_tool(tool_call)
+
+                if tool_call.function.name == "generate_chart_image":
+                    yield str(result) + "\n\n"
+                    tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
+                else:
+                    tool_content = str(result)
+                    if len(tool_content) > 3500:
+                        tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
+
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": tool_content,
+                })
+            continue
+        else:
+            if resp_msg.content:
+                clean = re.sub(r"<think>.*?</think>", "", resp_msg.content, flags=re.DOTALL).strip()
+                words = clean.split(" ")
+                for i, w in enumerate(words):
+                    yield w + (" " if i < len(words) - 1 else "")
+                    if i % 4 == 0:
+                        await asyncio.sleep(0.01)
+                has_streamed = True
+                return
+            else:
+                break
+
+    if not has_streamed:
+        last_tool_res = ""
+        for m in reversed(conversation):
+            if m.get("role") == "tool" and m.get("content"):
+                last_tool_res = m["content"]
+                break
+        if last_tool_res:
+            yield f"**Hasil Analisis Terkini:**\n\n{last_tool_res}"
+        else:
+            yield "⚠️ Maaf, tidak ada respon data yang dapat ditampilkan saat ini."

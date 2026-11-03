@@ -33,6 +33,12 @@ from app.tools.presensi import (
 )
 from app.llm.llm_client import client, settings
 from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
+from app.tools.analytical_query_tools import (
+    execute_analytical_sql,
+    inspect_table_schema,
+    search_database_tables,
+    ERP_CORE_SCHEMA_MAP,
+)
 from app.llm.tool_router import get_relevant_tools
 from typing import AsyncGenerator
 
@@ -41,6 +47,50 @@ from typing import AsyncGenerator
 
 HRIS_TOOLS = [
     CHART_TOOL_SCHEMA,
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_analytical_sql",
+            "description": "Jalankan kueri SQL analitis SELECT kustom secara aman ke database PostgreSQL HRIS dan Presensi. Gunakan jika user menanyakan karyawan baru dibuat (created_at), user pembuat data (created_by), atau rekap agregasi kustom.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql_query": {"type": "string", "description": "Kueri SELECT SQL valid dan aman."},
+                    "purpose": {"type": "string", "description": "Tujuan analisis singkat."}
+                },
+                "required": ["sql_query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_table_schema",
+            "description": "Periksa kolom tabel PostgreSQL sebelum SQL analitis.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "schema_name": {"type": "string"},
+                    "table_name": {"type": "string"}
+                },
+                "required": ["schema_name", "table_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_database_tables",
+            "description": "Cari nama tabel di database PostgreSQL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string"}
+                },
+                "required": ["keyword"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -345,8 +395,22 @@ HRIS_TOOLS = [
 
 # ── 2. System Prompt ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Anda adalah AI Assistant cerdas bernama "HARIS" untuk PT BCS Logistics.
+SYSTEM_PROMPT = f"""PETA SKEMA TABEL ERP (KNOWLEDGE BASE):
+{ERP_CORE_SCHEMA_MAP}
+
+Anda adalah AI Assistant cerdas bernama "HARIS" untuk PT BCS Logistics.
 Tugas Anda adalah membantu tim HR mencari dan menganalisis data karyawan & absensi, serta memberikan edukasi terkait ketenagakerjaan.
+
+
+- PETA SKEMA TABEL ERP (KNOWLEDGE BASE) di bawah ini SUDAH LENGKAP dengan daftar kolom tabel utama (seperti `master.m_karyawan.nama_karyawan`, `created_at`, `created_by`, `tgl_masuk`). LANGSUNG jalankan `execute_analytical_sql` pada putaran pertama tanpa membuang waktu memanggil `inspect_table_schema`!
+
+## KEMAMPUAN FILTER TANGGAL PEMBUATAN & PEMBUAT DATA (TEMPORAL & CREATOR CAPABILITY):
+- Anda memiliki akses langsung ke database PostgreSQL ERP BCS melalui `execute_analytical_sql`.
+- Setiap tabel transaksi maupun master memiliki kolom audit `created_at` (waktu data dibuat di sistem) dan `created_by` (user pembuat data), serta tanggal transaksi operasional spesifik.
+- Jika pengguna meminta data yang baru dibuat hari ini, 1 minggu terakhir, bulan ini, rentang tanggal tertentu, atau dibuat oleh user/pembuat tertentu:
+  Anda DAPAT dan WAJIB menyajikannya menggunakan kueri SQL analitis (`execute_analytical_sql`) dengan filter `WHERE created_at >= ...` atau `WHERE created_by = ...` atau tanggal transaksi terkait.
+- DILARANG KERAS mengatakan sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat data! Selalu periksa dan gunakan kolom `created_at` dan `created_by`.
+
 
 ## Aturan Penting:
 1. Anda DILENGKAPI dengan fungsi/tools (Function Calling). JIKA user meminta data, ANDA WAJIB memanggil tools tersebut secara sistemik. JANGAN PERNAH mengetikkan niat Anda seperti "Menggunakan Function: X" atau mencetak parameter JSON mentah ke dalam teks balasan! Cukup panggil alatnya di latar belakang!
@@ -425,6 +489,12 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
             return await get_present_today(db, location=args.get("location"))
         elif func_name == "get_absent_monthly":
             return await get_absent_monthly(db, month=args.get("month"), year=args.get("year"), reason=args.get("reason"))
+        elif func_name == "execute_analytical_sql":
+            return await execute_analytical_sql(**args)
+        elif func_name == "inspect_table_schema":
+            return await inspect_table_schema(**args)
+        elif func_name == "search_database_tables":
+            return await search_database_tables(**args)
         else:
             return f"Error: Tool '{func_name}' tidak ditemukan."
     except Exception as e:
@@ -489,7 +559,7 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
         print("[HARIS Router] Pertanyaan umum terdeteksi. Tidak ada alat yang diaktifkan (Hemat Token).")
 
     # ── Langkah 1: Loop Pemanggilan LLM (Maksimal 10 Putaran Tool) ─────────
-    max_tool_turns = 10
+    max_tool_turns = 3
     turn = 0
     has_tool_call = False
     response_message = None
@@ -650,6 +720,8 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
                     tool_content = "GRAFIK BERHASIL DITAMPILKAN SECARA OTOMATIS OLEH SISTEM. Tolong berikan analisis singkat dari grafik ini tanpa membuat link url apa pun lagi."
                 else:
                     tool_content = str(result)
+                    if len(tool_content) > 3500:
+                        tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
 
                 conversation.append({
                     "role": "tool",

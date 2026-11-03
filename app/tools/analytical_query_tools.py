@@ -31,8 +31,8 @@ FORBIDDEN_KEYWORDS = [
 ERP_CORE_SCHEMA_MAP = """
 [MASTER DATA]
 - master.m_unit: id (bigint), no_unit (varchar plat nomor cth: 'A9357TY', 'A9138R'), jenis_unit, asset_group, kategori, is_active
-- master.m_karyawan: id, payroll_id (varchar cth: '2301.4045'), nama, jabatan, departemen, status_karyawan
-- master.m_customer: id, customer_code, customer_name, customer_type (PLATINUM/GOLD/SILVER/STANDARD), is_active
+- master.m_karyawan: id (int), payroll_id (varchar cth: '2301.4045'), nama_karyawan (varchar nama lengkap), title (jabatan), dept_id, status (PERMANENT/CONTRACT), tgl_masuk (date), created_at, created_by, updated_at
+- master.m_customer: id (uuid), kode_kustomer, nama_kustomer, tier, kategori, is_active, created_at, created_by
 - master.m_materials: id, material_code, name, model, brand, part_no, uom, standard_price, stock
 - master.m_rute_ujo: id, origin, destination, rute_name, jarak_km, ujo_driver
 - master.m_drivers: id, employee_id, sim_no, sim_type, status
@@ -72,9 +72,24 @@ ERP_CORE_SCHEMA_MAP = """
 - qhse.customer_complaints: id, complaint_date, customer_id, category, description, resolution, status
 
 [MARKETING & SALES]
-- marketing.sales_order: id, so_number, so_date, customer_id, total_amount, target_tonnage, status
-- marketing.contract: id, contract_number, customer_id, start_date, end_date, target_tonnage, delivered_tonnage, status
-- marketing.deals: id, deal_name, customer_id, deal_stage, estimated_value, closing_date
+- marketing.sales_order: id (varchar no SO/DO misal 'DO-PO-623201-700'), customer_id (uuid join master.m_customer.id), jenis_muatan, berat_muatan, tariff, status, contract_id, created_at, created_by
+- marketing.contract: id (varchar no kontrak misal 'PO-2026-06-7104'), customer_id (uuid join master.m_customer.id), start_date, end_date, target_tonnage, delivered_tonnage, status, created_at, created_by
+- marketing.deals: id, deal_name, customer_id, deal_stage, estimated_value, closing_date, created_at
+
+[DMS (DOCUMENT MANAGEMENT & ARSIP)]
+- dms.documents: id (uuid), doc_number (varchar), title (varchar), doc_type_id (uuid), entity_type ('FLEET', 'DRIVER', 'CUSTOMER', 'CORPORATE'), issue_date (date), expiry_date (date), status ('ACTIVE', 'EXPIRED', 'PENDING'), physical_status, filing_location_id, created_at (timestamp, waktu pembuatan berkas), created_by (varchar, nama user/pembuat berkas), notes, metadata (jsonb)
+- dms.m_doc_type: id (uuid), name (varchar, cth: 'Uji Berkala / KIR', 'STNK', 'SIM A Pengemudi'), code, entity_type
+- dms.m_filing_location: id, name (nama lemari/ruang arsip), description
+
+[PROCUREMENT & LOGISTIK]
+- procurement.purchase_order: id, po_number, order_date, vendor_id, total_amount, status, created_at, created_by
+- procurement.purchase_request: id, pr_number, request_date, department, status, created_at, created_by
+- procurement.goods_receipt: id, gr_number, receipt_date, po_id, status, created_at
+
+[HRIS & PRESENSI]
+- presensi.presences: id, user_id, presence_date, time_in, time_out, status, created_at
+- presensi.leaves: id, user_id, leave_type_id, start_date, end_date, total_days, reason, status, created_at
+- hris.training_programs: id, title, start_date, end_date, budget, status, created_at
 """
 
 

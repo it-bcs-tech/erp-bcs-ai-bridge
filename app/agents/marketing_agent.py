@@ -195,7 +195,7 @@ KEMAMPUAN UTAMA ANDA:
    - Menghitung pelanggan dengan kontribusi tonase atau pendapatan terbesar (Pareto 80/20).
    - Melacak deviasi antara target tonase kontrak dengan realisasi ritase aktual.
    - Menganalisis rata-rata tarif angkut per ton atau per rute pengiriman.
-4. Gunakan tool inspeksi skema (`inspect_table_schema` / `search_database_tables`) jika memerlukan kepastian nama kolom sebelum menjalankan SQL analitis.
+4. PETA SKEMA TABEL ERP (KNOWLEDGE BASE) di bawah ini SUDAH LENGKAP dengan daftar kolom tabel utama. LANGSUNG jalankan `execute_analytical_sql` pada putaran pertama tanpa membuang waktu memanggil `inspect_table_schema` kecuali untuk tabel yang belum ada di daftar skema.
 5. Jika pengguna meminta visualisasi grafik penjualan atau distribusi tonase, panggil tool `generate_chart_image`.
 
 STANDAR STRUKTUR JAWABAN ANDA:
@@ -206,6 +206,12 @@ STANDAR STRUKTUR JAWABAN ANDA:
 
 PETA SKEMA TABEL ERP (KNOWLEDGE BASE):
 {ERP_CORE_SCHEMA_MAP}
+
+KEMAMPUAN FILTER TANGGAL PEMBUATAN & PEMBUAT DATA (TEMPORAL & CREATOR CAPABILITY):
+- Anda memiliki akses langsung ke kolom `created_at` (tanggal/waktu pembuatan) dan `created_by` (nama user pembuat) di tabel `marketing.sales_order`, `marketing.contract`, dan `marketing.deals`.
+- Jika pengguna meminta data yang baru dibuat hari ini, 1 minggu terakhir, bulan ini, rentang tanggal tertentu, atau oleh pembuat tertentu:
+  Anda DAPAT dan WAJIB menyajikannya melalui kueri SQL analitis (`execute_analytical_sql`) dengan filter `WHERE created_at >= ...` atau `WHERE created_by = ...`.
+- DILARANG KERAS mengatakan sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat data!
 
 BATASAN KETAT:
 - JANGAN PERNAH mengatakan "maaf data tidak tersedia" jika informasi tersebut dapat dihitung dari database menggunakan `execute_analytical_sql`.
@@ -276,7 +282,7 @@ async def process_marketing_chat(messages: list[dict]) -> AsyncGenerator[str, No
     Orkestrasi alur ReAct Multi-Round MARKO:
     1. Prune riwayat obrolan
     2. Multi-turn reasoning loop untuk mengevaluasi data komersial
-    3. Sintesis laporan marketing secara streaming
+    3. Real-time word streaming respon final
     """
     pruned_history = prune_conversation_history(messages, max_history=6)
 
@@ -287,93 +293,79 @@ async def process_marketing_chat(messages: list[dict]) -> AsyncGenerator[str, No
     conversation.extend(pruned_history)
 
     active_model = CANDIDATE_MODELS[0]
-    MAX_ROUNDS = 4
+    MAX_ROUNDS = 3
+    has_streamed = False
 
     for round_idx in range(MAX_ROUNDS):
-        is_last_round = (round_idx == MAX_ROUNDS - 1)
+        resp_msg = None
+        last_err = None
 
-        if not is_last_round:
-            resp_msg = None
-            last_err = None
+        for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
+            try:
+                resp = await client.chat.completions.create(
+                    model=model_name,
+                    messages=conversation,
+                    tools=MARKETING_TOOLS,
+                    tool_choice="auto",
+                    temperature=0.1,
+                )
+                resp_msg = resp.choices[0].message
+                active_model = model_name
+                break
+            except Exception as e:
+                err_str = str(e)
+                last_err = e
+                if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str:
+                    continue
+                else:
+                    yield f"⚠️ MARKO gagal memproses permintaan: {err_str}"
+                    return
 
-            for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
-                try:
-                    resp = await client.chat.completions.create(
-                        model=model_name,
-                        messages=conversation,
-                        tools=MARKETING_TOOLS,
-                        tool_choice="auto",
-                        temperature=0.1,
-                    )
-                    resp_msg = resp.choices[0].message
-                    active_model = model_name
-                    break
-                except Exception as e:
-                    err_str = str(e)
-                    last_err = e
-                    if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str or "too large" in err_str.lower():
-                        continue
-                    else:
-                        yield f"⚠️ MARKO gagal memproses permintaan: {err_str}"
-                        return
-
-            if resp_msg is None:
-                yield f"⚠️ Maaf, kapasitas model sedang penuh ({str(last_err)}). Silakan coba lagi."
-                return
-
-            if resp_msg.tool_calls:
-                conversation.append(resp_msg)
-                for tool_call in resp_msg.tool_calls:
-                    result = await _execute_marketing_tool(tool_call)
-
-                    if tool_call.function.name == "generate_chart_image":
-                        yield str(result)
-                        tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
-                    else:
-                        tool_content = str(result)
-                        if len(tool_content) > 3500:
-                            tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
-
-                    conversation.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "content": tool_content,
-                    })
-                continue
-            else:
-                if resp_msg.content:
-                    clean = re.sub(r"<think>.*?</think>", "", resp_msg.content, flags=re.DOTALL).strip()
-                    words = clean.split(" ")
-                    for i, w in enumerate(words):
-                        yield w + (" " if i < len(words) - 1 else "")
-                        if i % 4 == 0:
-                            await asyncio.sleep(0.01)
-                return
-        else:
-            stream_success = False
-            for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
-                try:
-                    stream = await client.chat.completions.create(
-                        model=model_name,
-                        messages=conversation,
-                        tools=MARKETING_TOOLS,
-                        tool_choice="auto",
-                        temperature=0.3,
-                        stream=True,
-                    )
-                    async for chunk in _stream_filtered(stream):
-                        yield chunk
-                    stream_success = True
-                    break
-                except Exception as e:
-                    err_str = str(e)
-                    if "429" in err_str or "rate limit" in err_str.lower() or "413" in err_str:
-                        continue
-                    else:
-                        yield f"\n⚠️ [Stream Error]: {err_str}"
-                        return
-
-            if not stream_success:
-                yield "\n⚠️ Gagal menghasilkan respon final. Silakan coba beberapa saat lagi."
+        if resp_msg is None:
+            yield f"⚠️ Maaf, kapasitas model sedang penuh ({str(last_err)}). Silakan coba lagi."
             return
+
+        if resp_msg.tool_calls:
+            conversation.append(resp_msg)
+            for tool_call in resp_msg.tool_calls:
+                result = await _execute_marketing_tool(tool_call)
+
+                if tool_call.function.name == "generate_chart_image":
+                    yield str(result) + "\n\n"
+                    tool_content = "Berhasil membuat dan menyajikan grafik ke layar."
+                else:
+                    tool_content = str(result)
+                    if len(tool_content) > 3500:
+                        tool_content = tool_content[:3500] + "\n... [Sebagian data diringkas demi kapasitas token]"
+
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": tool_content,
+                })
+            continue
+        else:
+            if resp_msg.content:
+                clean = re.sub(r"<think>.*?</think>", "", resp_msg.content, flags=re.DOTALL).strip()
+                words = clean.split(" ")
+                for i, w in enumerate(words):
+                    yield w + (" " if i < len(words) - 1 else "")
+                    if i % 4 == 0:
+                        import asyncio
+                        await asyncio.sleep(0.01)
+                has_streamed = True
+                return
+            else:
+                break
+
+    if not has_streamed:
+        last_tool_res = ""
+        for m in reversed(conversation):
+            if m.get("role") == "tool" and m.get("content"):
+                last_tool_res = m["content"]
+                break
+        if last_tool_res:
+            yield f"**Hasil Analisis Komersial Terkini:**\n\n{last_tool_res}"
+        else:
+            yield "⚠️ Maaf, tidak ada respon data yang dapat ditampilkan saat ini."

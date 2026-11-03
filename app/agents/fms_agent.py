@@ -12,6 +12,7 @@ Tools yang tersedia: fms_tools.py (data dari go-map Golang backend → EasyGo GP
 
 import re
 import json
+import asyncio
 from datetime import datetime
 from typing import AsyncGenerator
 
@@ -26,6 +27,12 @@ from app.tools.fms_tools import (
     get_unit_trip_stats,
 )
 from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
+from app.tools.analytical_query_tools import (
+    execute_analytical_sql,
+    inspect_table_schema,
+    search_database_tables,
+    ERP_CORE_SCHEMA_MAP,
+)
 
 
 # ── 1. Definisi Tools untuk LLM ──────────────────────────────────
@@ -163,6 +170,21 @@ Tugas Anda adalah membantu tim operasional FMS (Fleet Management System) untuk:
 - Mendeteksi kemacetan, keterlambatan, atau anomali perjalanan
 - Memberikan laporan ringkas kondisi armada
 - Menjawab pertanyaan spesifik tentang unit atau pengemudi
+
+## Kemampuan Analisis Database & Tanggal Pembuatan (Temporal & Creator):
+- Anda memiliki akses langsung ke database armada ERP BCS (`master.m_unit`, `fleet.trip`, `fleet.work_orders`, `fleet.vehicle_inspections`, dll).
+- Jika pengguna menanyakan data baru yang dibuat hari ini, minggu ini, rentang tanggal tertentu, atau pembuat data:
+  Anda DAPAT dan WAJIB menyajikannya melalui `execute_analytical_sql` dengan filter `WHERE created_at >= ...` atau `WHERE tgl_trip >= ...` atau `WHERE wo_date >= ...`.
+- DILARANG KERAS mengatakan sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat data!
+
+
+## KEMAMPUAN FILTER TANGGAL PEMBUATAN & PEMBUAT DATA (TEMPORAL & CREATOR CAPABILITY):
+- Anda memiliki akses langsung ke database PostgreSQL ERP BCS melalui `execute_analytical_sql`.
+- Setiap tabel transaksi maupun master memiliki kolom audit `created_at` (waktu data dibuat di sistem) dan `created_by` (user pembuat data), serta tanggal transaksi operasional spesifik.
+- Jika pengguna meminta data yang baru dibuat hari ini, 1 minggu terakhir, bulan ini, rentang tanggal tertentu, atau dibuat oleh user/pembuat tertentu:
+  Anda DAPAT dan WAJIB menyajikannya menggunakan kueri SQL analitis (`execute_analytical_sql`) dengan filter `WHERE created_at >= ...` atau `WHERE created_by = ...` atau tanggal transaksi terkait.
+- DILARANG KERAS mengatakan sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat data! Selalu periksa dan gunakan kolom `created_at` dan `created_by`.
+
 
 ## Aturan Penting:
 1. Anda DILENGKAPI dengan tools GPS real-time. WAJIB panggil tools jika data dibutuhkan secara sistemik. JANGAN PERNAH mengetikkan niat Anda seperti "Menggunakan Function: X" atau mencetak JSON ke dalam teks balasan!
@@ -302,7 +324,7 @@ async def process_fms_chat(
         print("[FARIDA Router] Pertanyaan umum terdeteksi. Tidak ada alat yang diaktifkan (Hemat Token).")
 
     # ── Langkah 1: Loop Pemanggilan LLM (Maksimal 3 Putaran Tool) ─────────
-    max_tool_turns = 3
+    max_tool_turns = 2
     turn = 0
     has_tool_call = False
     current_model = settings.llm_model
@@ -506,27 +528,31 @@ async def process_fms_chat(
 
     # ── Langkah 2: Stream jawaban final ──────────────────────
     if has_tool_call:
+        conversation.append({
+            "role": "user",
+            "content": "Berdasarkan data operasional armada yang diperoleh dari sistem di atas, sekarang tuliskan laporan analisis lengkap, terstruktur, dan profesional untuk pengguna. Jangan memanggil tool apa pun lagi.",
+        })
         candidate_models = [current_model, "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
         candidate_models = list(dict.fromkeys(candidate_models))
         streamed = False
 
         for m_candidate in candidate_models:
             try:
-                stream_kwargs = {
-                    "model": m_candidate,
-                    "messages": conversation,
-                    "temperature": 0.7,
-                    "stream": True,
-                }
-                if active_tools:
-                    stream_kwargs["tools"] = active_tools
-                    stream_kwargs["tool_choice"] = "auto"
-
-                stream = await client.chat.completions.create(**stream_kwargs)
-                async for chunk in _stream_filtered(stream):
-                    yield chunk
-                streamed = True
-                break
+                resp = await client.chat.completions.create(
+                    model=m_candidate,
+                    messages=conversation,
+                    temperature=0.3,
+                )
+                final_text = resp.choices[0].message.content or ""
+                if final_text:
+                    clean = re.sub(r"<think>.*?</think>", "", final_text, flags=re.DOTALL).strip()
+                    words = clean.split(" ")
+                    for i, w in enumerate(words):
+                        yield w + (" " if i < len(words) - 1 else "")
+                        if i % 4 == 0:
+                            await asyncio.sleep(0.01)
+                    streamed = True
+                    break
             except Exception as e:
                 print(f"[FARIDA Stream] Model {m_candidate} gagal: {e}")
                 if "429" in str(e) or "rate_limit" in str(e).lower():
@@ -536,9 +562,22 @@ async def process_fms_chat(
                     return
 
         if not streamed:
-            yield "\n⚠️ Maaf, layanan monitoring FARIDA sedang mengalami antrian kuota provider AI."
+            last_tool_res = ""
+            for m in reversed(conversation):
+                if m.get("role") == "tool" and m.get("content"):
+                    last_tool_res = m["content"]
+                    break
+            if last_tool_res:
+                yield f"**Laporan Operasional Armada (Data Terkini):**\n\n{last_tool_res}"
+            else:
+                yield "\n⚠️ Maaf, layanan monitoring FARIDA sedang mengalami antrian kuota provider AI."
     else:
-        # Tidak ada tool call sama sekali sejak putaran pertama
-        if response_message.content:
+        if response_message and response_message.content:
             clean = re.sub(r"<think>.*?</think>", "", response_message.content, flags=re.DOTALL).strip()
-            yield clean
+            words = clean.split(" ")
+            for i, w in enumerate(words):
+                yield w + (" " if i < len(words) - 1 else "")
+                if i % 4 == 0:
+                    await asyncio.sleep(0.01)
+        else:
+            yield "Halo! Saya FARIDA, asisten monitoring armada FMS PT BCS Logistics. Ada yang bisa saya bantu terkait armada atau rute perjalanan hari ini?"

@@ -14,6 +14,7 @@ settings = get_settings()
 # Buat async engine — pool_size disesuaikan agar tidak membebani DB
 engine = create_async_engine(
     settings.database_url,
+    connect_args={"ssl": False},
     echo=settings.ai_bridge_debug,  # Log SQL queries saat debug
     pool_size=5,
     max_overflow=10,
