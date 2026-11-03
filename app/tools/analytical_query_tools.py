@@ -77,7 +77,8 @@ ERP_CORE_SCHEMA_MAP = """
 - marketing.deals: id, deal_name, customer_id, deal_stage, estimated_value, closing_date, created_at
 
 [DMS (DOCUMENT MANAGEMENT & ARSIP)]
-- dms.documents: id (uuid), doc_number (varchar), title (varchar), doc_type_id (uuid), entity_type ('FLEET', 'DRIVER', 'CUSTOMER', 'CORPORATE'), issue_date (date), expiry_date (date), status ('ACTIVE', 'EXPIRED', 'PENDING'), physical_status, filing_location_id, created_at (timestamp, waktu pembuatan berkas), created_by (varchar, nama user/pembuat berkas), notes, metadata (jsonb)
+- dms.documents: id (uuid), doc_number (varchar), title (varchar), doc_type_id (uuid), entity_type ('FLEET', 'DRIVER', 'CUSTOMER', 'CORPORATE'), issue_date (date, tgl terbit perpanjangan/asli), expiry_date (date, tgl kedaluwarsa), status ('ACTIVE', 'EXPIRED', 'PENDING'), physical_status, filing_location_id, created_at (timestamp, waktu registrasi awal berkas), updated_at (timestamp, waktu update/perpanjangan berkas), created_by (varchar, nama user registrasi), notes, metadata (jsonb)
+- dms.document_audit_logs: id (uuid), document_id (uuid), action ('CREATE', 'UPDATE', 'VIEW'), user_name (varchar, nama user/petugas yang menginput/memperbarui berkas, cth: 'JONI SUTOPO (LEGAL)'), details (jsonb), created_at (timestamp, waktu aksi dilakukan)
 - dms.m_doc_type: id (uuid), name (varchar, cth: 'Uji Berkala / KIR', 'STNK', 'SIM A Pengemudi'), code, entity_type
 - dms.m_filing_location: id, name (nama lemari/ruang arsip), description
 

@@ -76,8 +76,9 @@ DMS_TOOLS = [
             "name": "search_documents",
             "description": (
                 "Cari dokumen arsip berdasarkan nomor dokumen, nopol kendaraan, nama driver, judul dokumen, tipe dokumen (KIR/STNK/SIM), "
-                "tanggal pembuatan (created_at/rentang tanggal), atau nama user pembuat dokumen (created_by). "
-                "Gunakan jika pengguna menanyakan dokumen spesifik, dokumen baru dibuat, atau dokumen berdasarkan pembuatnya."
+                "tanggal input/pembuatan/pembaruan (created_from/created_to meliputi created_at, updated_at, dan issue_date), "
+                "atau nama user pembuat/pengupdate dokumen (created_by yang dicek ke created_by dan audit logs dms.document_audit_logs). "
+                "Gunakan jika pengguna menanyakan dokumen spesifik, dokumen baru diinput/dibuat/diperpanjang, atau dokumen berdasarkan pembuat/pengupdate."
             ),
             "parameters": {
                 "type": "object",
@@ -100,15 +101,15 @@ DMS_TOOLS = [
                     },
                     "created_from": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Filter tanggal awal pembuatan dokumen (format 'YYYY-MM-DD', misal: '2026-10-26').",
+                        "description": "Filter tanggal awal input/perpanjangan/pembuatan (format 'YYYY-MM-DD', misal: '2026-10-26'). Mencakup created_at, updated_at, dan issue_date.",
                     },
                     "created_to": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Filter tanggal akhir pembuatan dokumen (format 'YYYY-MM-DD', misal: '2026-11-02').",
+                        "description": "Filter tanggal akhir input/perpanjangan/pembuatan (format 'YYYY-MM-DD', misal: '2026-11-02'). Mencakup created_at, updated_at, dan issue_date.",
                     },
                     "created_by": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "description": "Nama atau username pembuat dokumen (misal: 'superhyperadmin', 'admin', 'System Migration').",
+                        "description": "Nama atau username pembuat atau pengupdate dokumen (misal: 'Joni Sutopo', 'superhyperadmin', admin). Mencakup audit logs.",
                     },
                     "sort_by": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -232,17 +233,23 @@ KEMAMPUAN UTAMA & AKSES DATA ANDA:
    - Dokumen legalitas armada (STNK, KIR, BPKB, Izin Trayek, B3), lisensi pengemudi (SIM A/B1/B2, sertifikat), kontrak, sertifikat, dan perizinan.
    - Peringatan dini masa kedaluwarsa berkas (Expiry Alerts).
    - Lokasi fisik penyimpanan berkas asli di lemari/rak/box arsip.
-2. KEMAMPUAN FILTER TANGGAL PEMBUATAN & PEMBUAT DOKUMEN (TEMPORAL & CREATOR SEARCH):
-   - Tabel `dms.documents` memiliki kolom `created_at` (timestamp pembuatan) dan `created_by` (nama/username pembuat berkas).
-   - Jika pengguna meminta dokumen yang "baru dibuat", dokumen "1 minggu terakhir", dokumen "hari ini / bulan ini", atau dokumen "yang dibuat oleh user tertentu":
-     Gunakan tool `search_documents` dengan parameter `created_from`, `created_to`, dan `created_by`, ATAU gunakan `execute_analytical_sql` dengan klausa `WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'` atau filter sejenis.
-   - DILARANG KERAS mengatakan "sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat dokumen". Anda MEMILIKI AKSES PENUH ke data tersebut!
+2. LOGIKA BISNIS INPUT & PERPANJANGAN DOKUMEN (CRITICAL DOMAIN LOGIC):
+   - Penginputan dan pembaruan dokumen berkala (seperti Uji Berkala / KIR, STNK, SIM Driver, Lisensi B3) dilakukan user/staf melalui pendaftaran baru ATAU perpanjangan (renewal).
+   - Pada perpanjangan dokumen berkala, baris dokumen yang ada di `dms.documents` diperbarui pada kolom `issue_date` (tanggal terbit perpanjangan), `expiry_date` (jatuh tempo baru), dan `updated_at`. Riwayat siapa yang menginput/memperbarui tercatat di `dms.document_audit_logs` (kolom `user_name`, action 'UPDATE' / 'CREATE'). Kolom `created_at` adalah tanggal registrasi awal sistem (bisa bertahun-tahun lalu).
+   - Jika pengguna menanyakan dokumen yang "baru dibuat", "baru diinput", "1 minggu terakhir", "hari ini / bulan ini", atau "dibuat/diinput oleh user X":
+     * WAJIB memanggil tool `search_documents` dengan parameter `keyword` (cth: 'KIR'), `created_from` (cth: '2026-10-26'), atau `created_by` (cth: 'Joni Sutopo'). Tool `search_documents` sudah otomatis mencakup `created_at`, `updated_at`, `issue_date`, dan `document_audit_logs`.
+     * Jika Anda menggunakan `execute_analytical_sql`, WAJIB menggunakan filter:
+       `(d.created_at >= CURRENT_DATE - INTERVAL '7 days' OR d.updated_at >= CURRENT_DATE - INTERVAL '7 days' OR d.issue_date >= CURRENT_DATE - INTERVAL '7 days')`
+       serta mengambil nama pengupdate/pembuat terkini:
+       `COALESCE((SELECT al.user_name FROM dms.document_audit_logs al WHERE al.document_id = d.id AND al.action IN ('CREATE', 'UPDATE') ORDER BY al.created_at DESC LIMIT 1), d.created_by, 'System') AS pembuat_pengupdate`
+       dan diurutkan `ORDER BY COALESCE(d.updated_at, d.issue_date::timestamp, d.created_at) DESC`.
+     * DILARANG KERAS hanya menyaring `created_at` tanpa `updated_at` dan `issue_date`, karena itu akan membuat Anda melewatkan dokumen perpanjangan KIR/STNK yang baru saja diinput user!
+     * DILARANG KERAS mengatakan "sistem memiliki batasan tidak bisa memfilter tanggal pembuatan atau pembuat dokumen". Anda MEMILIKI AKSES PENUH ke data tersebut!
 3. Jika Anda sudah mendapatkan data dari tool spesifik (`search_documents`, `get_expiring_documents`, atau `execute_analytical_sql`), SEGERA sajikan jawaban final. JANGAN memanggil tool inspeksi skema berulang-ulang tanpa tujuan.
 4. Jika pengguna meminta grafik visualisasi dokumen, panggil tool `generate_chart_image`.
-5. STRATEGI CERDAS PENCARIAN TANGGAL PEMBUATAN:
-   - Jika pengguna meminta dokumen yang "baru dibuat" atau tipe tertentu (misal: KIR, STNK, dll.) namun dalam rentang waktu ketat (misal 7 hari) belum ada entri baru:
-     Tampilkan dokumen-dokumen yang paling baru dibuat di sistem (`ORDER BY created_at DESC LIMIT 10`) lengkap dengan kolom No Dokumen, Judul/Jenis, Tanggal Dibuat (`created_at`), dan Pembuat Dokumen (`created_by`).
-     Jelaskan bahwa itu adalah dokumen-dokumen terbaru yang tersimpan di sistem.
+5. STRATEGI RESPON HASIL PENCARIAN DOKUMEN:
+   - Sajikan tabel yang jelas berisi: No Dokumen, Judul/Jenis Dokumen, Tanggal Terbit/Update, Pembuat/Pengupdate (user), Masa Berlaku / Status.
+   - Jika dalam rentang waktu yang diminta benar-benar tidak ada entri baru, sajikan dokumen yang paling baru diupdate/terbit di sistem lengkap dengan informasi tanggal dan pengupdatenya.
    - JANGAN PERNAH menyajikan respon kosong jika di database ada data dokumen.
 
 PETA SKEMA TABEL ERP (KNOWLEDGE BASE):

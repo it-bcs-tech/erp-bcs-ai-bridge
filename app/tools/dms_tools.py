@@ -35,6 +35,23 @@ def _normalize_entity_type(ent: str | None) -> str | None:
     return val
 
 
+def _parse_date_or_dt(val: str | None) -> tuple[datetime | None, date | None]:
+    """Helper untuk mem-parsing string tanggal ke datetime dan date aman untuk asyncpg."""
+    if not val or not str(val).strip():
+        return None, None
+    s = str(val).strip()
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt, dt.date()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt, dt.date()
+    except Exception:
+        return None, None
+
+
 async def get_dms_summary_stats() -> str:
     """
     Mengambil ringkasan statistik arsip & dokumen perusahaan:
@@ -152,21 +169,30 @@ async def search_documents(
                 conditions.append("UPPER(d.status) = :status")
                 params["status"] = status.strip().upper()
 
-            if created_from and created_from.strip():
-                conditions.append("d.created_at::date >= :created_from::date")
-                params["created_from"] = created_from.strip()
+            if created_from and str(created_from).strip():
+                dt_from, d_from = _parse_date_or_dt(created_from)
+                if dt_from:
+                    conditions.append("(d.created_at >= :created_from_dt OR d.updated_at >= :created_from_dt OR d.issue_date >= :created_from_d)")
+                    params["created_from_dt"] = dt_from
+                    params["created_from_d"] = d_from
 
-            if created_to and created_to.strip():
-                conditions.append("d.created_at::date <= :created_to::date")
-                params["created_to"] = created_to.strip()
+            if created_to and str(created_to).strip():
+                dt_to, d_to = _parse_date_or_dt(created_to)
+                if dt_to:
+                    dt_to_end = datetime(dt_to.year, dt_to.month, dt_to.day, 23, 59, 59)
+                    conditions.append("(d.created_at <= :created_to_dt OR d.updated_at <= :created_to_dt OR d.issue_date <= :created_to_d)")
+                    params["created_to_dt"] = dt_to_end
+                    params["created_to_d"] = d_to
 
-            if created_by and created_by.strip():
-                conditions.append("d.created_by ILIKE :created_by")
-                params["created_by"] = f"%{created_by.strip()}%"
+            if created_by and str(created_by).strip():
+                conditions.append(
+                    "(d.created_by ILIKE :created_by OR EXISTS (SELECT 1 FROM dms.document_audit_logs al WHERE al.document_id = d.id AND al.user_name ILIKE :created_by))"
+                )
+                params["created_by"] = f"%{str(created_by).strip()}%"
 
             where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-            order_clause = "ORDER BY d.created_at DESC NULLS LAST"
+            order_clause = "ORDER BY COALESCE(d.updated_at, d.issue_date::timestamp, d.created_at) DESC NULLS LAST"
             if sort_by == "expiry_soon":
                 order_clause = "ORDER BY d.expiry_date ASC NULLS LAST"
             elif sort_by == "title":
@@ -175,7 +201,14 @@ async def search_documents(
             q = f"""
                 SELECT 
                     d.id, d.doc_number, d.title, d.entity_type, d.issue_date, d.expiry_date,
-                    d.status, d.physical_status, d.created_at, d.created_by,
+                    d.status, d.physical_status, d.created_at, d.created_by, d.updated_at,
+                    (
+                        SELECT user_name 
+                        FROM dms.document_audit_logs 
+                        WHERE document_id = d.id AND action IN ('CREATE', 'UPDATE') 
+                        ORDER BY created_at DESC 
+                        LIMIT 1
+                    ) AS last_modifier,
                     t.name as type_name,
                     fl.name as filing_location_name
                 FROM dms.documents d
@@ -218,12 +251,20 @@ async def search_documents(
                 created_str = created_val.strftime("%d/%m/%Y %H:%M") if created_val else "-"
                 creator_str = r["created_by"] or "System Migration"
 
+                updated_val = r["updated_at"]
+                updated_str = updated_val.strftime("%d/%m/%Y %H:%M") if updated_val else "-"
+                modifier_str = r["last_modifier"] or creator_str
+
+                issue_val = r["issue_date"]
+                issue_str = issue_val.strftime("%d/%m/%Y") if issue_val else "-"
+
                 lines.append(
                     f"  • [{type_name}] {r['title']}\n"
-                    f"    No. Dokumen : {doc_no} | Status: {r['status']}\n"
-                    f"    Dibuat Pada : {created_str} | Pembuat: {creator_str}\n"
-                    f"    Masa Berlaku: {exp_label}\n"
-                    f"    Lokasi Fisik: {loc_str}\n"
+                    f"    No. Dokumen   : {doc_no} | Status: {r['status']}\n"
+                    f"    Tgl Terbit    : {issue_str} | Masa Berlaku: {exp_label}\n"
+                    f"    Diupdate/Oleh : {updated_str} (Oleh: {modifier_str})\n"
+                    f"    Dibuat Awal   : {created_str} (Pembuat: {creator_str})\n"
+                    f"    Lokasi Fisik  : {loc_str}\n"
                 )
 
             return "\n".join(lines)
@@ -309,7 +350,14 @@ async def get_document_detail(doc_number_or_title: str) -> str:
                 SELECT 
                     d.id, d.doc_number, d.title, d.entity_type, d.issue_date, d.expiry_date,
                     d.status, d.physical_status, d.notes, d.metadata, d.file_path,
-                    d.created_at, d.created_by,
+                    d.created_at, d.created_by, d.updated_at,
+                    (
+                        SELECT user_name 
+                        FROM dms.document_audit_logs 
+                        WHERE document_id = d.id AND action IN ('CREATE', 'UPDATE') 
+                        ORDER BY created_at DESC 
+                        LIMIT 1
+                    ) AS last_modifier,
                     t.name as type_name, c.name as category_name,
                     fl.name as filing_location_name, fl.description as filing_desc
                 FROM dms.documents d
@@ -329,6 +377,8 @@ async def get_document_detail(doc_number_or_title: str) -> str:
             exp_str = doc["expiry_date"].strftime("%d %B %Y") if doc["expiry_date"] else "Permanen / Tidak Terbatas"
             created_str = doc["created_at"].strftime("%d %B %Y (%H:%M WIB)") if doc["created_at"] else "-"
             creator_str = doc["created_by"] or "System Migration"
+            updated_str = doc["updated_at"].strftime("%d %B %Y (%H:%M WIB)") if doc["updated_at"] else "-"
+            modifier_str = doc["last_modifier"] or creator_str
 
             notes_str = f"\nCatatan        : {doc['notes']}" if doc["notes"] else ""
             file_str = f"\nFile Lampiran  : {doc['file_path']}" if doc["file_path"] else ""
@@ -340,7 +390,8 @@ async def get_document_detail(doc_number_or_title: str) -> str:
                 f"Kategori       : {doc['category_name'] or doc['entity_type'] or '-'}\n"
                 f"Status Berkas  : {doc['status']} (Fisik: {doc['physical_status'] or '-'})\n"
                 f"Dibuat Pada    : {created_str}\n"
-                f"Pembuat Dokumen: {creator_str}\n"
+                f"Pembuat Awal   : {creator_str}\n"
+                f"Terakhir Update: {updated_str} (Oleh: {modifier_str})\n"
                 f"Tanggal Terbit : {issue_str}\n"
                 f"Jatuh Tempo    : {exp_str}\n"
                 f"Lokasi Arsip   : {doc['filing_location_name'] or 'Belum Ditentukan'}\n"
