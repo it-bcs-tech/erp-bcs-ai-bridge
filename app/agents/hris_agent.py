@@ -20,6 +20,7 @@ from app.tools.employees import (
     get_employees_by_location,
     get_employee_list,
     get_employee_full_profile,
+    get_employee_supervisor,
     get_people_analytics,
 )
 from app.tools.presensi import (
@@ -371,6 +372,23 @@ HRIS_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_employee_supervisor",
+            "description": "Ambil informasi atasan langsung (manager / supervisor / kepala bagian) dari satu atau beberapa karyawan berdasarkan hierarki master.m_atasan. Gunakan saat user menanyakan 'siapa atasan si X', 'siapa manager dia', 'atasan dari karyawan tersebut', 'siapa atasan mereka'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {
+                        "type": "string",
+                        "description": "Nama atau NIK/payroll ID karyawan (bisa satu nama atau beberapa nama dipisah 'dan' / koma)."
+                    }
+                },
+                "required": ["name_or_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_employee_full_profile",
             "description": (
                 "Dapatkan profil lengkap karyawan: status kerja, jabatan, divisi, departemen, lokasi kerja, tanggal bergabung, "
@@ -432,6 +450,11 @@ Tugas Anda adalah membantu tim HR mencari dan menganalisis data karyawan & absen
 
 - PETA SKEMA TABEL ERP (KNOWLEDGE BASE) di bawah ini SUDAH LENGKAP dengan daftar kolom tabel utama (seperti `master.m_karyawan.nama_karyawan`, `created_at`, `created_by`, `tgl_masuk`). LANGSUNG jalankan `execute_analytical_sql` pada putaran pertama tanpa membuang waktu memanggil `inspect_table_schema`!
 
+## STRUKTUR ATASAN & HIERARKI ORGANISASI:
+- Database memiliki tabel matriks hierarki atasan di `master.m_atasan` yang memetakan jabatan bawahan (`title_bawahan`) ke jabatan atasan (`title_atasan`).
+- Jika pengguna menanyakan siapa atasan, supervisor, kepala bagian, atau manager dari seorang/beberapa karyawan (termasuk referensi konteks seperti 'karyawan tersebut', 'mereka berdua', dll), PANGGIL tool `get_employee_supervisor`!
+- DILARANG KERAS mengatakan database tidak memiliki informasi atasan atau struktur organisasi! Selalu gunakan tool `get_employee_supervisor` atau periksa `master.m_atasan`.
+
 ## KEMAMPUAN FILTER TANGGAL PEMBUATAN & PEMBUAT DATA (TEMPORAL & CREATOR CAPABILITY):
 - Anda memiliki akses langsung ke database PostgreSQL ERP BCS melalui `execute_analytical_sql`.
 - Setiap tabel transaksi maupun master memiliki kolom audit `created_at` (waktu data dibuat di sistem) dan `created_by` (user pembuat data), serta tanggal transaksi operasional spesifik.
@@ -490,6 +513,8 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
                 year=args.get("year"),
                 only_late=args.get("only_late", False),
             )
+        elif func_name == "get_employee_supervisor":
+            return await get_employee_supervisor(db, name_or_id=args.get("name_or_id", ""))
         elif func_name == "get_employee_full_profile":
             return await get_employee_full_profile(db, name_or_id=args.get("name_or_id", ""))
         elif func_name == "get_people_analytics":
@@ -539,21 +564,25 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
         return f"INFO DATABASE: Terjadi kesalahan saat mengambil data: {str(e)}"
 
 
-def prune_conversation_history(messages: list[dict], max_history: int = 6, max_assistant_chars: int = 600) -> list[dict]:
+def prune_conversation_history(messages: list[dict], max_history: int = 10, max_assistant_chars: int = 3500) -> list[dict]:
     """
-    Mengoptimalkan riwayat percakapan untuk menghemat token (Token Optimization):
-    1. Membuang pesan error sistem (misal: ⚠️ HARIS mengalami antrian...)
-    2. Mengambil maksimal N pesan terakhir (Sliding Context Window)
-    3. Meringkas respon asisten yang terlalu panjang dari putaran sebelumnya
+    Memangkas riwayat obrolan secara aman untuk menjaga kontinuitas konteks percakapan multi-turn:
+    1. Membuang pesan error sistem.
+    2. Menyimpan hingga N pesan terakhir (Sliding Window 10 pesan / 5 putaran penuh).
+    3. Mempertahankan konteks entitas (tabel, nama, ID, nomor dokumen/unit) hingga 3500 karakter per pesan asisten.
     """
     clean = []
     for m in messages:
         c = m.get("content", "")
         if isinstance(c, str) and (c.strip().startswith("⚠️") or "Error code:" in c):
             continue
-        clean.append(m)
+        clean.append(dict(m))
 
-    sliced = clean[-max_history:]
+    if len(clean) <= max_history:
+        sliced = clean
+    else:
+        sliced = clean[-max_history:]
+
     pruned = []
     for i, m in enumerate(sliced):
         role = m.get("role")
@@ -561,7 +590,7 @@ def prune_conversation_history(messages: list[dict], max_history: int = 6, max_a
         if role == "assistant" and isinstance(content, str) and len(content) > max_assistant_chars and i < len(sliced) - 1:
             pruned.append({
                 "role": role,
-                "content": content[:max_assistant_chars] + "\n\n...[Ringkasan data tabel sebelumnya untuk konteks]..."
+                "content": content[:max_assistant_chars] + "\n\n... [Sebagian rincian data diringkas demi kapasitas token] ..."
             })
         else:
             pruned.append(m)
@@ -575,7 +604,7 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
         + f"\n[INFO SISTEM: Waktu sekarang adalah {now_str}.]\n"
     )
 
-    optimized_messages = prune_conversation_history(messages, max_history=6, max_assistant_chars=600)
+    optimized_messages = prune_conversation_history(messages, max_history=10, max_assistant_chars=3500)
     conversation = [{"role": "system", "content": dynamic_prompt}] + optimized_messages
 
     # ── Langkah 0: Pemilihan Alat Dinamis (Intent Routing) ──
@@ -597,7 +626,7 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
         print("[HARIS Router] Pertanyaan umum terdeteksi. Tidak ada alat yang diaktifkan (Hemat Token).")
 
     # ── Langkah 1: Loop Pemanggilan LLM (Maksimal 10 Putaran Tool) ─────────
-    max_tool_turns = 3
+    max_tool_turns = 4
     turn = 0
     has_tool_call = False
     response_message = None
@@ -822,10 +851,10 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
         if has_tool_call:
             conversation.append({
                 "role": "user",
-                "content": "Tolong rangkum semua data yang sudah diperoleh di atas ke dalam format yang rapi dan lengkap untuk pengguna.",
+                "content": "Berdasarkan seluruh data yang diperoleh di atas, tolong berikan rangkuman jawaban akhir yang ramah, rapi, dan lengkap dalam format Markdown untuk pengguna. Dilarang memanggil fungsi/tool lagi.",
             })
-            candidate_models = [current_model, "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
-            candidate_models = list(dict.fromkeys(candidate_models))
+            candidate_models = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", current_model, "openai/gpt-oss-120b"]
+            candidate_models = list(dict.fromkeys([m for m in candidate_models if m]))
             
             for m_candidate in candidate_models:
                 try:
@@ -834,16 +863,32 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
                         messages=conversation,
                         temperature=0.3,
                     )
-                    final_content = synth.choices[0].message.content or ""
-                    if final_content:
+                    msg_obj = synth.choices[0].message
+                    if msg_obj.content and msg_obj.content.strip():
+                        final_content = msg_obj.content.strip()
                         break
                 except Exception as e:
-                    print(f"[HARIS Synthesis] Model {m_candidate} gagal: {e}")
-                    if "429" in str(e) or "rate_limit" in str(e).lower():
+                    err_s = str(e)
+                    print(f"[HARIS Synthesis] Model {m_candidate} gagal: {err_s}")
+                    if "429" in err_s or "rate_limit" in err_s.lower() or "tool_use_failed" in err_s or "400" in err_s:
                         continue
                     else:
-                        yield f"\n⚠️ [Sintesis Error]: {str(e)}"
-                        return
+                        break
+
+            if not final_content:
+                # Fallback aman: ekstrak data dari hasil tool terakhir daripada melempar error
+                last_tool_text = ""
+                for msg_item in reversed(conversation):
+                    if msg_item.get("role") == "tool" and msg_item.get("content"):
+                        last_tool_text = msg_item["content"]
+                        break
+                    elif msg_item.get("role") == "user" and "[System: Hasil dari" in msg_item.get("content", ""):
+                        last_tool_text = msg_item["content"]
+                        break
+                if last_tool_text:
+                    final_content = f"Berikut data yang berhasil ditemukan:\n\n{last_tool_text}"
+                else:
+                    final_content = "Maaf, sistem sedang memproses antrian data AI. Silakan coba sesaat lagi."
 
             if not final_content:
                 final_content = "Maaf, sistem sedang mengalami antrian batas kuota AI provider. Silakan coba sesaat lagi."

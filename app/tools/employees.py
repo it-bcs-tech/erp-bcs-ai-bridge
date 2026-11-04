@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, date
 from typing import Optional
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -625,3 +626,69 @@ async def get_people_analytics(
         logger.error(f"get_people_analytics error: {e}")
         return f"INFO DATABASE: Terjadi kesalahan saat memproses people analytics: {str(e)}"
 
+
+
+async def get_employee_supervisor(db: AsyncSession, name_or_id: str) -> str:
+    """
+    Mengambil informasi atasan langsung (manager / supervisor / head) dari satu atau beberapa karyawan
+    berdasarkan struktur hierarki organisasi di master.m_atasan dan master.m_title.
+    """
+    try:
+        raw_names = [n.strip() for n in re.split(r",|\s+dan\s+|\s+dan/atau\s+", name_or_id) if n.strip()]
+        if not raw_names:
+            return "Mohon sebutkan nama atau ID karyawan yang ingin dicari atasannya."
+
+        results_lines = []
+
+        for name in raw_names:
+            val = name.strip()
+            pattern = f"%{val}%"
+
+            q_emp = text("""
+                SELECT k.id, k.payroll_id, k.nama_karyawan, k.title AS title_code, COALESCE(t.title, k.title) AS jabatan,
+                       COALESCE(d.dept_name, k.dept_id) AS departemen
+                FROM master.m_karyawan k
+                LEFT JOIN master.m_title t ON k.title = t.title_code
+                LEFT JOIN master.m_dept d ON k.dept_id = d.dept_code
+                WHERE k.payroll_id = :val OR LOWER(k.nama_karyawan) LIKE LOWER(:pattern)
+                LIMIT 1
+            """)
+            res_emp = await db.execute(q_emp, {"val": val, "pattern": pattern})
+            emp = res_emp.mappings().first()
+            if not emp:
+                results_lines.append(f"❌ Karyawan '{name}' tidak ditemukan di database master.")
+                continue
+
+            q_atasan = text("""
+                SELECT 
+                    a.title_atasan,
+                    t_atasan.title AS jabatan_atasan,
+                    k_atasan.nama_karyawan AS nama_atasan,
+                    k_atasan.payroll_id AS nik_atasan
+                FROM master.m_atasan a
+                JOIN master.m_title t_atasan ON a.title_atasan = t_atasan.title_code
+                LEFT JOIN master.m_karyawan k_atasan ON k_atasan.title = a.title_atasan AND k_atasan.aktif = 'Y'
+                WHERE a.title_bawahan = :title_code
+            """)
+            res_at = await db.execute(q_atasan, {"title_code": emp["title_code"]})
+            atasans = res_at.mappings().all()
+
+            lines = [
+                f"👤 **{emp['nama_karyawan']}** (ID: {emp['payroll_id']})",
+                f"• Jabatan: {emp['jabatan']} | Departemen: {emp['departemen']}",
+            ]
+            if atasans:
+                lines.append("👑 **Atasan Langsung (Hierarki master.m_atasan):**")
+                for at in atasans:
+                    pejabat = at['nama_atasan'] or '(Posisi belum terisi pejabat aktif)'
+                    nik = f" [ID: {at['nik_atasan']}]" if at['nik_atasan'] else ""
+                    lines.append(f"• **{at['jabatan_atasan']}** — {pejabat}{nik}")
+            else:
+                lines.append("ℹ️ Belum terkonfigurasi pemetaan atasan langsung di matriks `master.m_atasan`.")
+            
+            results_lines.append("\n".join(lines))
+
+        return "\n\n---\n\n".join(results_lines)
+    except Exception as e:
+        logger.error(f"get_employee_supervisor error: {e}")
+        return f"INFO DATABASE: Terjadi kesalahan saat mencari atasan karyawan: {str(e)}"

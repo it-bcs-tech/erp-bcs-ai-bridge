@@ -275,15 +275,25 @@ async def _stream_filtered(stream) -> AsyncGenerator[str, None]:
 
 from app.llm.tool_router import get_relevant_tools
 
-def prune_conversation_history(messages: list[dict], max_history: int = 6, max_assistant_chars: int = 600) -> list[dict]:
+def prune_conversation_history(messages: list[dict], max_history: int = 10, max_assistant_chars: int = 3500) -> list[dict]:
+    """
+    Memangkas riwayat obrolan secara aman untuk menjaga kontinuitas konteks percakapan multi-turn:
+    1. Membuang pesan error sistem.
+    2. Menyimpan hingga N pesan terakhir (Sliding Window 10 pesan / 5 putaran penuh).
+    3. Mempertahankan konteks entitas (tabel, nama, ID, nomor dokumen/unit) hingga 3500 karakter per pesan asisten.
+    """
     clean = []
     for m in messages:
         c = m.get("content", "")
         if isinstance(c, str) and (c.strip().startswith("⚠️") or "Error code:" in c):
             continue
-        clean.append(m)
+        clean.append(dict(m))
 
-    sliced = clean[-max_history:]
+    if len(clean) <= max_history:
+        sliced = clean
+    else:
+        sliced = clean[-max_history:]
+
     pruned = []
     for i, m in enumerate(sliced):
         role = m.get("role")
@@ -291,7 +301,7 @@ def prune_conversation_history(messages: list[dict], max_history: int = 6, max_a
         if role == "assistant" and isinstance(content, str) and len(content) > max_assistant_chars and i < len(sliced) - 1:
             pruned.append({
                 "role": role,
-                "content": content[:max_assistant_chars] + "\n\n...[Ringkasan data tabel sebelumnya untuk konteks]..."
+                "content": content[:max_assistant_chars] + "\n\n... [Sebagian rincian data diringkas demi kapasitas token] ..."
             })
         else:
             pruned.append(m)
@@ -314,7 +324,7 @@ async def process_fms_chat(
         "Data GPS diperbarui otomatis setiap 30 detik dari EasyGo GPS.]\n"
     )
 
-    optimized_messages = prune_conversation_history(messages, max_history=6, max_assistant_chars=600)
+    optimized_messages = prune_conversation_history(messages, max_history=10, max_assistant_chars=3500)
     conversation = [{"role": "system", "content": dynamic_prompt}] + optimized_messages
 
     # ── Langkah 0: Pemilihan Alat Dinamis (Intent Routing) ──

@@ -51,18 +51,36 @@ CANDIDATE_MODELS = [
 CANDIDATE_MODELS = list(dict.fromkeys([m for m in CANDIDATE_MODELS if m]))
 
 
-def prune_conversation_history(messages: list[dict], max_history: int = 6) -> list[dict]:
+def prune_conversation_history(messages: list[dict], max_history: int = 10, max_assistant_chars: int = 3500) -> list[dict]:
     """
-    Memangkas riwayat obrolan agar tidak memicu TPM/TPD rate limit.
-    Menyimpan pesan-pesan terakhir dan memadatkan respons asisten lama.
+    Memangkas riwayat obrolan secara aman untuk menjaga kontinuitas konteks percakapan multi-turn:
+    1. Membuang pesan error sistem.
+    2. Menyimpan hingga N pesan terakhir (Sliding Window 10 pesan / 5 putaran penuh).
+    3. Mempertahankan konteks entitas (tabel, nama, ID, nomor dokumen/unit) hingga 3500 karakter per pesan asisten.
     """
-    if len(messages) <= max_history:
-        return messages
+    clean = []
+    for m in messages:
+        c = m.get("content", "")
+        if isinstance(c, str) and (c.strip().startswith("⚠️") or "Error code:" in c):
+            continue
+        clean.append(dict(m))
 
-    pruned = messages[-max_history:]
-    for msg in pruned[:-1]:
-        if msg.get("role") == "assistant" and len(msg.get("content", "")) > 500:
-            msg["content"] = msg["content"][:300] + "... [ringkasan sebelumnya]"
+    if len(clean) <= max_history:
+        sliced = clean
+    else:
+        sliced = clean[-max_history:]
+
+    pruned = []
+    for i, m in enumerate(sliced):
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "assistant" and isinstance(content, str) and len(content) > max_assistant_chars and i < len(sliced) - 1:
+            pruned.append({
+                "role": role,
+                "content": content[:max_assistant_chars] + "\n\n... [Sebagian rincian data diringkas demi kapasitas token] ..."
+            })
+        else:
+            pruned.append(m)
     return pruned
 
 
@@ -450,7 +468,7 @@ async def process_ocs_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
     2. Multi-turn reasoning loop untuk evaluasi data analitis
     3. Real-time word streaming respon final
     """
-    pruned_history = prune_conversation_history(messages, max_history=6)
+    pruned_history = prune_conversation_history(messages, max_history=10, max_assistant_chars=3500)
 
     now_str = datetime.now().strftime("%d %B %Y (%H:%M WIB)")
     dynamic_prompt = ORIS_SYSTEM_PROMPT + f"\n[INFO SISTEM: Waktu saat ini adalah {now_str}.]\n"

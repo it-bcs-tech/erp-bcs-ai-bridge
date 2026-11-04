@@ -31,7 +31,9 @@ FORBIDDEN_KEYWORDS = [
 ERP_CORE_SCHEMA_MAP = """
 [MASTER DATA]
 - master.m_unit: id (bigint), no_unit (varchar plat nomor cth: 'A9357TY', 'A9138R'), jenis_unit, asset_group, kategori, is_active
-- master.m_karyawan: id (int), payroll_id (varchar cth: '2301.4045'), nama_karyawan (varchar nama lengkap), title (jabatan), dept_id, status (PERMANENT/CONTRACT), tgl_masuk (date), created_at, created_by, updated_at
+- master.m_karyawan: id (int), payroll_id (varchar cth: '2301.4045'), nama_karyawan (varchar nama lengkap), title (jabatan FK ke m_title.title_code), dept_id (FK m_dept), div_id (FK m_division), status (PERMANENT/CONTRACT), tgl_masuk (date), created_at, created_by, updated_at
+- master.m_title: title_code (varchar cth: 'JB_292'), title (nama jabatan lengkap cth: 'IT INFRASTRUCTURE, NETWORK & PROGRAMMING')
+- master.m_atasan: id, title_atasan (FK ke m_title.title_code), title_bawahan (FK ke m_title.title_code), approver, status (matriks struktur hierarki atasan-bawahan)
 - master.m_customer: id (uuid), kode_kustomer, nama_kustomer, tier, kategori, is_active, created_at, created_by
 - master.m_materials: id, material_code, name, model, brand, part_no, uom, standard_price, stock
 - master.m_rute_ujo: id, origin, destination, rute_name, jarak_km, ujo_driver

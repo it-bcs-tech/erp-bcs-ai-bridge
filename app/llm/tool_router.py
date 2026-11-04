@@ -75,6 +75,10 @@ TOOL_KEYWORDS = {
         "history", "riwayat", "history absensi", "riwayat absensi", "history presensi",
         "history kehadiran", "log absensi", "log absen", "riwayat absen",
     ],
+        "get_employee_supervisor": [
+        "atasan", "bawahan", "supervisor", "manager", "bos", "lead", "kepala", "pimpinan",
+        "struktur", "hierarki", "organigram", "melapor ke",
+    ],
     "get_employee_full_profile": [
         "profil lengkap", "detail karyawan", "masa kerja", "lama kerja", "join date",
         "tanggal masuk", "sisa cuti", "saldo cuti", "kuota cuti", "atasan", "biodata",
