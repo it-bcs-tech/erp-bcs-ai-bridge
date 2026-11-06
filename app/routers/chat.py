@@ -53,6 +53,8 @@ async def chat(request: ChatRequest):
 
     async def generate():
         try:
+            # Initial byte agar Nginx/Proxy langsung menerima 200 OK headers (anti-504 timeout)
+            yield " "
             # Cek Cache dulu
             cached_response = await get_cache(cache_key)
             if cached_response:

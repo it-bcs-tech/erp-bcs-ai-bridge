@@ -28,6 +28,7 @@ from app.tools.presensi import (
     get_absent_today,
     get_attendance_monthly,
     get_leave_today,
+    get_leave_requests,
     get_present_today,
     get_absent_monthly,
     get_employee_attendance_logs,
@@ -304,6 +305,31 @@ HRIS_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_leave_requests",
+            "description": "Ambil rekapitulasi jumlah dan daftar permohonan cuti (leave requests) karyawan dari tabel presensi.leaves, terutama yang berstatus PENDING (menunggu persetujuan / pending approval), APPROVED, REJECTED, atau permohonan dari nama karyawan tertentu. WAJIB dipanggil jika user menanyakan status pengajuan cuti, cuti pending, permohonan cuti yang belum di-approve/reject, atau leave approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "approved", "rejected", "all"],
+                        "description": "Status permohonan cuti. Default: 'pending'."
+                    },
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Opsional. Nama karyawan jika ingin mencari riwayat cuti orang tertentu."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Batas jumlah baris (default 20)."
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_leave_today",
             "description": "Dapatkan daftar nama karyawan yang sedang cuti hari ini.",
             "parameters": {"type": "object", "properties": {}}
@@ -546,6 +572,8 @@ async def execute_tool(tool_call, db: AsyncSession) -> str:
                 sort_by=args.get("sort_by") or "newest",
                 limit=args.get("limit") or 20,
             )
+        elif func_name == "get_leave_requests":
+            return await get_leave_requests(db, status=args.get("status") or "pending", employee_name=args.get("employee_name"), limit=args.get("limit") or 20)
         elif func_name == "get_leave_today":
             return await get_leave_today(db)
         elif func_name == "get_present_today":

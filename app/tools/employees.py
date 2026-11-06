@@ -126,15 +126,22 @@ async def get_employee_count(db: AsyncSession) -> str:
 
 
 async def search_employee_by_name(db: AsyncSession, name: str) -> str:
-    """Cari karyawan berdasarkan nama (partial match)."""
+    """Cari karyawan berdasarkan nama (partial match) - bebas tanda baca/titik."""
+    val = name.strip()
+    pattern = f"%{val}%"
+    clean_val = re.sub(r'[\.\,\-_]+', ' ', val).strip()
+    clean_val = re.sub(r'\s+', ' ', clean_val)
+    clean_pattern = f"%{clean_val}%"
+
     query = text(f"""
         {BASE_EMPLOYEE_SELECT}
-        WHERE LOWER(k.nama_karyawan) LIKE LOWER(:pattern)
+        WHERE (LOWER(k.nama_karyawan) LIKE LOWER(:pattern)
+           OR REPLACE(REPLACE(LOWER(k.nama_karyawan), '.', ''), '-', ' ') LIKE LOWER(:clean_pattern))
           AND k.aktif = 'Y'
         ORDER BY k.nama_karyawan
         LIMIT 10
     """)
-    result = await db.execute(query, {"pattern": f"%{name}%"})
+    result = await db.execute(query, {"pattern": pattern, "clean_pattern": clean_pattern})
     rows = result.mappings().all()
 
     if not rows:
@@ -380,112 +387,123 @@ async def get_employees_by_division(db: AsyncSession, division: str | None = Non
 
 # ── Tool 8: Profil Lengkap Karyawan (Strict Salary Guardrail) 
 async def get_employee_full_profile(db: AsyncSession, name_or_id: str) -> str:
-    """Mengambil biodata dan profil lengkap kepegawaian (non-finansial) seorang karyawan, mencakup masa kerja, sisa kuota cuti tahunan, status kontrak, dan riwayat izin/sakit.
+    """Mengambil biodata dan profil lengkap kepegawaian (non-finansial) satu atau beberapa karyawan, mencakup masa kerja, sisa kuota cuti tahunan, status kontrak, dan detail kontak. Mendukung nama majemuk (mis: 'Adi Fuadil dan M. Syamsul') dan pencarian bebas tanda baca.
 
     KEBIJAKAN KEAMANAN: Fungsi ini secara ketat mengecualikan seluruh informasi finansial / nominal gaji.
     """
     try:
-        val = name_or_id.strip()
-        pattern = f"%{val}%"
+        raw_names = [n.strip() for n in re.split(r",|\s+dan\s+|\s+dan/atau\s+|\s+and\s+|\s*&\s*", name_or_id) if n.strip()]
+        if not raw_names:
+            return "Mohon sebutkan nama atau ID karyawan yang ingin dicari profilnya."
 
-        # Explicitly NO salary / slip / THP fields!
-        query = text("""
-            SELECT 
-                k.id,
-                k.payroll_id,
-                k.nama_karyawan,
-                COALESCE(t.title, k.title) AS jabatan,
-                COALESCE(d.dept_name, k.dept_id) AS departemen,
-                COALESCE(dv.div_name, k.div_id) AS divisi,
-                COALESCE(l.loc_name, k.lokasi) AS lokasi,
-                k.status,
-                k.aktif,
-                k.jenis_kelamin,
-                k.tgl_masuk,
-                k.tgl_keluar,
-                k.agreement_expire,
-                k.tempat_lahir,
-                k.tgl_lahir,
-                k.agama,
-                k.pendidikan_terakhir,
-                k.jurusan,
-                k.nama_sekolah_terakhir,
-                k.tahun_lulus,
-                k.marital_status,
-                k.email,
-                k.telp1,
-                k.point_of_hire,
-                mp.id as presensi_user_id
-            FROM master.m_karyawan k
-            LEFT JOIN master.m_title t ON k.title = t.title_code
-            LEFT JOIN master.m_dept d ON k.dept_id = d.dept_code
-            LEFT JOIN master.m_division dv ON k.div_id = dv.div_code
-            LEFT JOIN master.m_lokasi l ON k.lokasi = l.loc_code
-            LEFT JOIN master.m_presensi mp ON mp.karyawan_id = k.id
-            WHERE k.payroll_id = :val OR LOWER(k.nama_karyawan) LIKE LOWER(:pattern)
-            LIMIT 1
-        """)
-        result = await db.execute(query, {"val": val, "pattern": pattern})
-        row = result.mappings().first()
+        profiles = []
+        for name in raw_names:
+            val = name.strip()
+            pattern = f"%{val}%"
+            clean_name = re.sub(r'[\.\,\-_]+', ' ', val).strip()
+            clean_name = re.sub(r'\s+', ' ', clean_name)
+            clean_pattern = f"%{clean_name}%"
 
-        if not row:
-            return f"INFO DATABASE: Tidak ditemukan profil karyawan dengan nama atau ID '{name_or_id}'."
-
-        # Hitung masa kerja (Tenure)
-        tgl_masuk = row["tgl_masuk"]
-        tenure_str = "-"
-        if tgl_masuk:
-            today = date.today()
-            years = today.year - tgl_masuk.year
-            months = today.month - tgl_masuk.month
-            if today.day < tgl_masuk.day:
-                months -= 1
-            if months < 0:
-                years -= 1
-                months += 12
-            tenure_parts = []
-            if years > 0:
-                tenure_parts.append(f"{years} tahun")
-            if months > 0:
-                tenure_parts.append(f"{months} bulan")
-            tenure_str = " ".join(tenure_parts) if tenure_parts else "Kurang dari 1 bulan"
-
-        # Status masa berlaku kontrak / agreement
-        contract_str = "-"
-        agr = row["agreement_expire"]
-        if agr:
-            today = date.today()
-            diff = (agr - today).days
-            tgl_agr_str = agr.strftime("%d %B %Y") if hasattr(agr, "strftime") else str(agr)
-            if diff > 0:
-                contract_str = f"Berlaku s/d {tgl_agr_str} ({diff} hari lagi)"
-            elif diff == 0:
-                contract_str = f"Berakhir hari ini ({tgl_agr_str})"
-            else:
-                contract_str = f"Telah berakhir pada {tgl_agr_str} (Perlu Pembaharuan)"
-        elif row["status"] == "PERMANENT":
-            contract_str = "Karyawan Tetap (Permanen)"
-        else:
-            contract_str = f"Status: {row['status']} (Tanggal berakhir tidak tercatat)"
-
-        # Cek sisa kuota cuti tahunan
-        uid = row["presensi_user_id"]
-        leave_quota_str = "Data saldo cuti tidak ditemukan di sistem presensi."
-        if uid:
-            q_lb = text("""
-                SELECT quota, used, (quota - used) as sisa 
-                FROM presensi.leave_balances 
-                WHERE user_id = :uid AND year = EXTRACT(YEAR FROM CURRENT_DATE)
+            query = text("""
+                SELECT 
+                    k.id,
+                    k.payroll_id,
+                    k.nama_karyawan,
+                    COALESCE(t.title, k.title) AS jabatan,
+                    COALESCE(d.dept_name, k.dept_id) AS departemen,
+                    COALESCE(dv.div_name, k.div_id) AS divisi,
+                    COALESCE(l.loc_name, k.lokasi) AS lokasi,
+                    k.status,
+                    k.aktif,
+                    k.jenis_kelamin,
+                    k.tgl_masuk,
+                    k.tgl_keluar,
+                    k.agreement_expire,
+                    k.tempat_lahir,
+                    k.tgl_lahir,
+                    k.agama,
+                    k.pendidikan_terakhir,
+                    k.jurusan,
+                    k.nama_sekolah_terakhir,
+                    k.tahun_lulus,
+                    k.marital_status,
+                    k.email,
+                    k.telp1,
+                    k.point_of_hire,
+                    mp.id as presensi_user_id
+                FROM master.m_karyawan k
+                LEFT JOIN master.m_title t ON k.title = t.title_code
+                LEFT JOIN master.m_dept d ON k.dept_id = d.dept_code
+                LEFT JOIN master.m_division dv ON k.div_id = dv.div_code
+                LEFT JOIN master.m_lokasi l ON k.lokasi = l.loc_code
+                LEFT JOIN master.m_presensi mp ON mp.karyawan_id = k.id
+                WHERE k.payroll_id = :val
+                   OR LOWER(k.nama_karyawan) LIKE LOWER(:pattern)
+                   OR REPLACE(REPLACE(LOWER(k.nama_karyawan), '.', ''), '-', ' ') LIKE LOWER(:clean_pattern)
+                LIMIT 1
             """)
-            res_lb = await db.execute(q_lb, {"uid": uid})
-            lb = res_lb.mappings().first()
-            if lb:
-                leave_quota_str = f"Kuota: {lb['quota']} hari | Terpakai: {lb['used']} hari | Sisa Saldo: {lb['sisa']} hari"
+            result = await db.execute(query, {"val": val, "pattern": pattern, "clean_pattern": clean_pattern})
+            row = result.mappings().first()
 
-        tgl_masuk_str = tgl_masuk.strftime("%d %B %Y") if (tgl_masuk and hasattr(tgl_masuk, "strftime")) else str(tgl_masuk or "-")
-        tgl_lahir_str = row["tgl_lahir"].strftime("%d %B %Y") if (row["tgl_lahir"] and hasattr(row["tgl_lahir"], "strftime")) else str(row["tgl_lahir"] or "-")
+            if not row:
+                profiles.append(f"❌ INFO DATABASE: Tidak ditemukan profil karyawan dengan nama atau ID '{name}'.")
+                continue
 
-        output = f"""👤 PROFIL LENGKAP KARYAWAN: {row['nama_karyawan']} (Payroll ID: {row['payroll_id']})
+            # Hitung masa kerja (Tenure)
+            tgl_masuk = row["tgl_masuk"]
+            tenure_str = "-"
+            if tgl_masuk:
+                today = date.today()
+                years = today.year - tgl_masuk.year
+                months = today.month - tgl_masuk.month
+                if today.day < tgl_masuk.day:
+                    months -= 1
+                if months < 0:
+                    years -= 1
+                    months += 12
+                tenure_parts = []
+                if years > 0:
+                    tenure_parts.append(f"{years} tahun")
+                if months > 0:
+                    tenure_parts.append(f"{months} bulan")
+                tenure_str = " ".join(tenure_parts) if tenure_parts else "Kurang dari 1 bulan"
+
+            # Status masa berlaku kontrak / agreement
+            contract_str = "-"
+            agr = row["agreement_expire"]
+            if agr:
+                today = date.today()
+                diff = (agr - today).days
+                tgl_agr_str = agr.strftime("%d %B %Y") if hasattr(agr, "strftime") else str(agr)
+                if diff > 0:
+                    contract_str = f"Berlaku s/d {tgl_agr_str} ({diff} hari lagi)"
+                elif diff == 0:
+                    contract_str = f"Berakhir hari ini ({tgl_agr_str})"
+                else:
+                    contract_str = f"Telah berakhir pada {tgl_agr_str} (Perlu Pembaharuan)"
+            elif row["status"] == "PERMANENT":
+                contract_str = "Karyawan Tetap (Permanen)"
+            else:
+                contract_str = f"Status: {row['status']} (Tanggal berakhir tidak tercatat)"
+
+            # Cek sisa kuota cuti tahunan
+            uid = row["presensi_user_id"]
+            leave_quota_str = "Data saldo cuti tidak ditemukan di sistem presensi."
+            if uid:
+                q_lb = text("""
+                    SELECT quota, used, (quota - used) as sisa 
+                    FROM presensi.leave_balances 
+                    WHERE user_id = :uid AND year = EXTRACT(YEAR FROM CURRENT_DATE)
+                """)
+                res_lb = await db.execute(q_lb, {"uid": uid})
+                lb = res_lb.mappings().first()
+                if lb:
+                    leave_quota_str = f"Kuota: {lb['quota']} hari | Terpakai: {lb['used']} hari | Sisa Saldo: {lb['sisa']} hari"
+
+            tgl_masuk_str = tgl_masuk.strftime("%d %B %Y") if (tgl_masuk and hasattr(tgl_masuk, "strftime")) else str(tgl_masuk or "-")
+            tgl_lahir_str = row["tgl_lahir"].strftime("%d %B %Y") if (row["tgl_lahir"] and hasattr(row["tgl_lahir"], "strftime")) else str(row["tgl_lahir"] or "-")
+
+            output = f"""👤 PROFIL LENGKAP KARYAWAN: {row['nama_karyawan']} (Payroll ID: {row['payroll_id']})
 ══════════════════════════════════════════════════════════════
 🏢 Informasi Kepegawaian & Penempatan:
 • Status Kepegawaian : {row['status']} ({'Aktif' if row['aktif'] == 'Y' else 'Non-Aktif'})
@@ -506,8 +524,9 @@ async def get_employee_full_profile(db: AsyncSession, name_or_id: str) -> str:
 • No. Telepon         : {row['telp1'] or '-'}
 • Tempat / Tgl Lahir  : {row['tempat_lahir'] or '-'}, {tgl_lahir_str}
 • Jenis Kelamin / Agm : {row['jenis_kelamin']} / {row['agama'] or '-'}"""
+            profiles.append(output)
 
-        return output
+        return "\n\n---\n\n".join(profiles)
     except Exception as e:
         logger.error(f"get_employee_full_profile error: {e}")
         return f"INFO DATABASE: Terjadi kesalahan saat membaca profil lengkap karyawan: {str(e)}"
@@ -643,6 +662,9 @@ async def get_employee_supervisor(db: AsyncSession, name_or_id: str) -> str:
         for name in raw_names:
             val = name.strip()
             pattern = f"%{val}%"
+            clean_name = re.sub(r'[\.\,\-_]+', ' ', val).strip()
+            clean_name = re.sub(r'\s+', ' ', clean_name)
+            clean_pattern = f"%{clean_name}%"
 
             q_emp = text("""
                 SELECT k.id, k.payroll_id, k.nama_karyawan, k.title AS title_code, COALESCE(t.title, k.title) AS jabatan,
@@ -651,9 +673,10 @@ async def get_employee_supervisor(db: AsyncSession, name_or_id: str) -> str:
                 LEFT JOIN master.m_title t ON k.title = t.title_code
                 LEFT JOIN master.m_dept d ON k.dept_id = d.dept_code
                 WHERE k.payroll_id = :val OR LOWER(k.nama_karyawan) LIKE LOWER(:pattern)
+                   OR REPLACE(REPLACE(LOWER(k.nama_karyawan), '.', ''), '-', ' ') LIKE LOWER(:clean_pattern)
                 LIMIT 1
             """)
-            res_emp = await db.execute(q_emp, {"val": val, "pattern": pattern})
+            res_emp = await db.execute(q_emp, {"val": val, "pattern": pattern, "clean_pattern": clean_pattern})
             emp = res_emp.mappings().first()
             if not emp:
                 results_lines.append(f"❌ Karyawan '{name}' tidak ditemukan di database master.")

@@ -427,3 +427,101 @@ async def get_employee_attendance_logs(
         logger.error(f"get_employee_attendance_logs error: {e}")
         return f"INFO DATABASE: Terjadi kesalahan saat mengambil log presensi karyawan: {str(e)}"
 
+
+
+# ── Tool 9: Monitoring & Rekap Permohonan Cuti (Leave Requests) ─────────
+async def get_leave_requests(
+    db: AsyncSession,
+    status: Optional[str] = "pending",
+    employee_name: Optional[str] = None,
+    limit: int = 20
+) -> str:
+    """Mengambil statistik dan daftar permohonan cuti (leave requests) karyawan dari tabel presensi.leaves.
+    Mendukung filter status: 'pending' (menunggu persetujuan), 'approved' (disetujui), 'rejected' (ditolak), atau 'all'.
+    Secara otomatis case-insensitive dan menyertakan nama karyawan, durasi, tanggal, serta rekap pending approval.
+    """
+    try:
+        # 1. Hitung total ringkasan secara case-insensitive
+        q_summary = text("""
+            SELECT 
+                COUNT(*) AS total_all,
+                COUNT(*) FILTER (WHERE LOWER(status) = 'pending') AS total_pending,
+                COUNT(*) FILTER (WHERE LOWER(status) = 'approved') AS total_approved,
+                COUNT(*) FILTER (WHERE LOWER(status) = 'rejected') AS total_rejected
+            FROM presensi.leaves
+        """)
+        res_summary = await db.execute(q_summary)
+        row_s = res_summary.mappings().first() or {}
+        tot_all = row_s.get("total_all", 0)
+        tot_pending = row_s.get("total_pending", 0)
+        tot_approved = row_s.get("total_approved", 0)
+        tot_rejected = row_s.get("total_rejected", 0)
+
+        # 2. Filter spesifik
+        filter_status = (status or "").strip().lower()
+        where_clauses = []
+        params = {"limit": limit}
+
+        if filter_status and filter_status != "all":
+            where_clauses.append("LOWER(l.status) = :status")
+            params["status"] = filter_status
+        
+        if employee_name and employee_name.strip():
+            emp_clean = re.sub(r'[\.\,\-_]+', ' ', employee_name).strip()
+            where_clauses.append("""
+                (LOWER(COALESCE(mk.nama_karyawan, mp.name, '')) LIKE :emp_pat 
+                 OR REPLACE(LOWER(COALESCE(mk.nama_karyawan, mp.name, '')), '.', '') LIKE :emp_clean)
+            """)
+            params["emp_pat"] = f"%{employee_name.strip()}%"
+            params["emp_clean"] = f"%{emp_clean}%"
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        q_list = text(f"""
+            SELECT 
+                l.id,
+                COALESCE(mk.nama_karyawan, mp.name, 'Karyawan ID: ' || l.user_id) AS nama_karyawan,
+                COALESCE(mk.payroll_id, '-') AS payroll_id,
+                COALESCE(d.dept_name, mk.dept_id, '-') AS departemen,
+                l.type,
+                l.start_date,
+                l.end_date,
+                l.status,
+                l.reason
+            FROM presensi.leaves l
+            LEFT JOIN master.m_presensi mp ON l.user_id = mp.id
+            LEFT JOIN master.m_karyawan mk ON mp.karyawan_id = mk.id
+            LEFT JOIN master.m_dept d ON mk.dept_id = d.dept_code
+            {where_sql}
+            ORDER BY l.id DESC
+            LIMIT :limit
+        """)
+        res_list = await db.execute(q_list, params)
+        rows = res_list.mappings().all()
+
+        status_label = filter_status.upper() if filter_status and filter_status != "all" else "SEMUA STATUS"
+        lines = [
+            f"📊 REKAP PERMOHONAN CUTI (LEAVE REQUESTS) - PT BCS LOGISTICS:",
+            f"• ⏳ Menunggu Persetujuan (Pending Approvals) : {tot_pending} permohonan",
+            f"• ✅ Disetujui (Approved)                    : {tot_approved} permohonan",
+            f"• ❌ Ditolak (Rejected)                      : {tot_rejected} permohonan",
+            f"• 📁 Total Seluruh Pengajuan Cuti            : {tot_all} permohonan\n",
+            f"📋 Daftar Permohonan Cuti Terkini (Filter: {status_label}, Menampilkan maks {limit} data):"
+        ]
+
+        if not rows:
+            lines.append(f"- Tidak ada data permohonan cuti yang cocok dengan kriteria filter '{status_label}'.")
+        else:
+            for r in rows:
+                s_date = r["start_date"].strftime("%d/%m/%Y") if hasattr(r["start_date"], "strftime") else str(r["start_date"])
+                e_date = r["end_date"].strftime("%d/%m/%Y") if hasattr(r["end_date"], "strftime") else str(r["end_date"])
+                dur_str = f"{s_date}" if s_date == e_date else f"{s_date} s/d {e_date}"
+                st_icon = "⏳" if r["status"].lower() == "pending" else ("✅" if r["status"].lower() == "approved" else "❌")
+                lines.append(
+                    f"• {st_icon} [LV-{r['id']}] **{r['nama_karyawan']}** (NIK: {r['payroll_id']}) — *{r['type']}* | Tanggal: {dur_str} | Status: **{r['status'].upper()}** (Ket: {r['reason'] or '-'})"
+                )
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"get_leave_requests error: {e}")
+        return f"INFO DATABASE: Terjadi kesalahan saat mengambil data cuti: {str(e)}"

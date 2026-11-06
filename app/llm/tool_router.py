@@ -58,6 +58,7 @@ TOOL_KEYWORDS = {
         "presensi bulan", "kehadiran bulan", "rekap presensi", "rekap kehadiran",
         "bulan", "bulanan", "monthly",
     ],
+    "get_leave_requests": ["cuti", "leave", "pending", "approval", "persetujuan", "diajukan", "permohonan cuti", "pengajuan cuti", "izin cuti", "menunggu persetujuan"],
     "get_leave_today": [
         "cuti", "leave", "libur",
     ],

@@ -91,7 +91,8 @@ ERP_CORE_SCHEMA_MAP = """
 
 [HRIS & PRESENSI]
 - presensi.presences: id, user_id, presence_date, time_in, time_out, status, created_at
-- presensi.leaves: id, user_id, leave_type_id, start_date, end_date, total_days, reason, status, created_at
+- presensi.leaves: id, user_id, type, start_date, end_date, reason, status, created_at (CATATAN: kolom status berisi 'pending', 'approved', 'rejected'. WAJIB gunakan LOWER(status) = 'pending' atau panggil tool get_leave_requests)
+- presensi.permission_requests: id, user_id, type, start_date, end_date, reason, status, created_at (status: 'pending', 'approved', 'rejected')
 - hris.training_programs: id, title, start_date, end_date, budget, status, created_at
 """
 
