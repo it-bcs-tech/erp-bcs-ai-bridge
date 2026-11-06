@@ -32,7 +32,7 @@ from app.tools.presensi import (
     get_absent_monthly,
     get_employee_attendance_logs,
 )
-from app.llm.llm_client import client, settings
+from app.llm.llm_client import client, settings, get_llm_client
 from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
 from app.tools.analytical_query_tools import (
     execute_analytical_sql,
@@ -603,6 +603,8 @@ async def process_hris_chat(
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> AsyncGenerator[str, None]:
     now_str = datetime.now().strftime("%d %B %Y (%H:%M WIB)")
     dynamic_prompt = (
@@ -612,6 +614,8 @@ async def process_hris_chat(
 
     optimized_messages = prune_conversation_history(messages, max_history=10, max_assistant_chars=3500)
     conversation = [{"role": "system", "content": dynamic_prompt}] + optimized_messages
+
+    active_client = get_llm_client(base_url=base_url, api_key=api_key)
 
     # ── Langkah 0: Pemilihan Alat Dinamis (Intent Routing) ──
     # Ambil pesan terakhir dari user
@@ -644,7 +648,7 @@ async def process_hris_chat(
         turn += 1
         try:
             if active_tools:
-                response = await client.chat.completions.create(
+                response = await active_client.chat.completions.create(
                     model=current_model,
                     messages=conversation,
                     tools=active_tools,
@@ -652,7 +656,7 @@ async def process_hris_chat(
                     temperature=0.1,
                 )
             else:
-                response = await client.chat.completions.create(
+                response = await active_client.chat.completions.create(
                     model=current_model,
                     messages=conversation,
                     temperature=active_temp,
@@ -677,7 +681,7 @@ async def process_hris_chat(
                         try:
                             print(f"[HARIS] Mengalihkan turn {turn} ke model fallback: {fb_m}")
                             if active_tools:
-                                response = await client.chat.completions.create(
+                                response = await active_client.chat.completions.create(
                                     model=fb_m,
                                     messages=conversation,
                                     tools=active_tools,
@@ -685,7 +689,7 @@ async def process_hris_chat(
                                     temperature=0.1,
                                 )
                             else:
-                                response = await client.chat.completions.create(
+                                response = await active_client.chat.completions.create(
                                     model=fb_m,
                                     messages=conversation,
                                     temperature=0.7,
@@ -743,7 +747,7 @@ async def process_hris_chat(
                     print(f"[HARIS] Tool call validation error detected. Self-healing retry with all HRIS_TOOLS...")
                     active_tools = HRIS_TOOLS
                     try:
-                        response = await client.chat.completions.create(
+                        response = await active_client.chat.completions.create(
                             model=current_model,
                             messages=conversation,
                             tools=active_tools,
@@ -865,7 +869,7 @@ async def process_hris_chat(
             
             for m_candidate in candidate_models:
                 try:
-                    synth = await client.chat.completions.create(
+                    synth = await active_client.chat.completions.create(
                         model=m_candidate,
                         messages=conversation,
                         temperature=0.3,

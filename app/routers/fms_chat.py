@@ -29,6 +29,11 @@ class FMSChatMessage(BaseModel):
 
 class FMSChatRequest(BaseModel):
     messages: list[FMSChatMessage]
+    model: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    base_url: str | None = None
+    api_key: str | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -44,22 +49,12 @@ async def fms_chat(
     Menerima conversation history dari frontend SvelteKit,
     FARIDA akan menganalisis kondisi armada secara real-time dan
     memberikan streaming response.
-
-    Request body:
-        {
-            "messages": [
-                {"role": "user", "content": "Ada berapa unit yang sedang bergerak?"},
-                ...
-            ]
-        }
-
-    Response:
-        text/plain stream — setiap chunk berisi teks dari FARIDA
     """
     messages_dict = [msg.model_dump() for msg in request.messages]
 
-    # Generate Hash Key unik dari pesan chat
-    cache_key = "fms_chat:" + hashlib.md5(json.dumps(messages_dict, sort_keys=True).encode()).hexdigest()
+    # Generate Hash Key unik dari pesan chat + model + endpoint
+    req_sig = f"{request.model}_{request.base_url}_{request.temperature}_{json.dumps(messages_dict, sort_keys=True)}"
+    cache_key = "fms_chat:" + hashlib.md5(req_sig.encode()).hexdigest()
 
     async def generate():
         # Cek Cache dulu
@@ -69,7 +64,14 @@ async def fms_chat(
             return
 
         full_response = ""
-        async for chunk in process_fms_chat(messages_dict):
+        async for chunk in process_fms_chat(
+            messages_dict,
+            model=request.model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            base_url=request.base_url,
+            api_key=request.api_key,
+        ):
             full_response += chunk
             yield chunk
             

@@ -16,7 +16,7 @@ import asyncio
 from datetime import datetime
 from typing import AsyncGenerator
 
-from app.llm.llm_client import client, settings
+from app.llm.llm_client import client, settings, get_llm_client
 from app.tools.fms_tools import (
     get_all_fleet_status,
     get_unit_detail,
@@ -310,6 +310,11 @@ def prune_conversation_history(messages: list[dict], max_history: int = 10, max_
 
 async def process_fms_chat(
     messages: list[dict],
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Pipeline utama FARIDA:
@@ -326,6 +331,8 @@ async def process_fms_chat(
 
     optimized_messages = prune_conversation_history(messages, max_history=10, max_assistant_chars=3500)
     conversation = [{"role": "system", "content": dynamic_prompt}] + optimized_messages
+
+    active_client = get_llm_client(base_url=base_url, api_key=api_key)
 
     # ── Langkah 0: Pemilihan Alat Dinamis (Intent Routing) ──
     last_user_msg = ""
@@ -344,13 +351,14 @@ async def process_fms_chat(
     max_tool_turns = 2
     turn = 0
     has_tool_call = False
-    current_model = settings.llm_model
+    current_model = model or settings.llm_model
+    active_temp = temperature if temperature is not None else 0.7
 
     while turn < max_tool_turns:
         turn += 1
         try:
             if active_tools:
-                response = await client.chat.completions.create(
+                response = await active_client.chat.completions.create(
                     model=current_model,
                     messages=conversation,
                     tools=active_tools,
@@ -358,10 +366,10 @@ async def process_fms_chat(
                     temperature=0.1,
                 )
             else:
-                response = await client.chat.completions.create(
+                response = await active_client.chat.completions.create(
                     model=current_model,
                     messages=conversation,
-                    temperature=0.7,
+                    temperature=active_temp,
                 )
             response_message = response.choices[0].message
         except Exception as e:
@@ -381,7 +389,7 @@ async def process_fms_chat(
                         try:
                             print(f"[FARIDA] Mengalihkan turn {turn} ke model fallback: {fb_m}")
                             if active_tools:
-                                response = await client.chat.completions.create(
+                                response = await active_client.chat.completions.create(
                                     model=fb_m,
                                     messages=conversation,
                                     tools=active_tools,
@@ -389,7 +397,7 @@ async def process_fms_chat(
                                     temperature=0.1,
                                 )
                             else:
-                                response = await client.chat.completions.create(
+                                response = await active_client.chat.completions.create(
                                     model=fb_m,
                                     messages=conversation,
                                     temperature=0.7,
@@ -555,7 +563,7 @@ async def process_fms_chat(
 
         for m_candidate in candidate_models:
             try:
-                resp = await client.chat.completions.create(
+                resp = await active_client.chat.completions.create(
                     model=m_candidate,
                     messages=conversation,
                     temperature=0.3,

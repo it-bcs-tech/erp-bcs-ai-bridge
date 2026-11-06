@@ -31,6 +31,8 @@ class ChatRequest(BaseModel):
     model: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    base_url: str | None = None
+    api_key: str | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -46,7 +48,7 @@ async def chat(request: ChatRequest):
     messages_dict = [msg.model_dump() for msg in request.messages]
 
     # Generate Hash Key unik dari pesan chat + model (Cache Key)
-    req_sig = f"{request.model}_{request.temperature}_{json.dumps(messages_dict, sort_keys=True)}"
+    req_sig = f"{request.model}_{request.base_url}_{request.temperature}_{json.dumps(messages_dict, sort_keys=True)}"
     cache_key = "hris_chat:" + hashlib.md5(req_sig.encode()).hexdigest()
 
     async def generate():
@@ -65,6 +67,8 @@ async def chat(request: ChatRequest):
                     model=request.model,
                     temperature=request.temperature,
                     max_tokens=request.max_tokens,
+                    base_url=request.base_url,
+                    api_key=request.api_key,
                 ):
                     full_response += chunk
                     yield chunk

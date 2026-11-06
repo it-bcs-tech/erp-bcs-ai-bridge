@@ -12,11 +12,17 @@ router = APIRouter()
 
 class ChatRequest(BaseModel):
     messages: List[Dict[str, Any]]
+    model: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    base_url: str | None = None
+    api_key: str | None = None
 
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     # Generate Hash Key unik dari pesan chat (Cache Key)
-    cache_key = "ocs_chat:" + hashlib.md5(json.dumps(request.messages, sort_keys=True).encode()).hexdigest()
+    req_sig = f"{request.model}_{request.base_url}_{request.temperature}_{json.dumps(request.messages, sort_keys=True)}"
+    cache_key = "ocs_chat:" + hashlib.md5(req_sig.encode()).hexdigest()
 
     async def generate():
         # Cek Cache dulu
@@ -26,7 +32,14 @@ async def chat_endpoint(request: ChatRequest):
             return
 
         full_response = ""
-        async for chunk in process_ocs_chat(request.messages):
+        async for chunk in process_ocs_chat(
+            request.messages,
+            model=request.model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            base_url=request.base_url,
+            api_key=request.api_key,
+        ):
             full_response += chunk
             yield chunk
 

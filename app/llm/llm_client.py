@@ -19,6 +19,24 @@ client = AsyncOpenAI(
 )
 
 
+def get_llm_client(base_url: str | None = None, api_key: str | None = None) -> AsyncOpenAI:
+    """
+    Mengembalikan client AsyncOpenAI. Jika base_url atau api_key kustom
+    diberikan, inisialisasi client baru dengan endpoint dan kredensial tersebut.
+    Jika kosong, gunakan singleton client bawaan settings.
+    """
+    effective_base_url = (base_url.strip() if base_url and base_url.strip() else None) or settings.llm_base_url
+    effective_api_key = (api_key.strip() if api_key and api_key.strip() else None) or settings.llm_api_key
+
+    if effective_base_url == settings.llm_base_url and effective_api_key == settings.llm_api_key:
+        return client
+
+    return AsyncOpenAI(
+        base_url=effective_base_url,
+        api_key=effective_api_key,
+    )
+
+
 async def stream_chat_completion(
     messages: list[dict],
     system_prompt: str,
