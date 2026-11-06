@@ -34,10 +34,15 @@ class Settings(BaseSettings):
     ai_bridge_port: int = 8000
     ai_bridge_debug: bool = False
 
+    # ── Redis (Opsional) ─────────────────────────────────────
+    redis_url: str = "redis://redis:6379/0"
+    redis_enabled: bool = True
+
     model_config = {
         "env_file": ENV_FILE_PATH if os.path.exists(ENV_FILE_PATH) else ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
+        "extra": "ignore",
     }
 
 
