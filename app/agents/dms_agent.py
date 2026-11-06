@@ -18,7 +18,7 @@ import json
 from datetime import datetime
 from typing import AsyncGenerator
 
-from app.llm.llm_client import client, settings
+from app.llm.llm_client import client, settings, get_llm_client
 from app.tools.chart_tools import CHART_TOOL_SCHEMA, generate_chart_image
 from app.tools.dms_tools import (
     get_dms_summary_stats,
@@ -346,7 +346,14 @@ async def _stream_filtered(stream) -> AsyncGenerator[str, None]:
         yield buffer
 
 
-async def process_dms_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
+async def process_dms_chat(
+    messages: list[dict],
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> AsyncGenerator[str, None]:
     """
     Main entry point untuk pemrosesan obrolan DIMAS DMS dengan tool calling multi-round
     dan real-time streaming respon akhir.
@@ -360,7 +367,11 @@ async def process_dms_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
     clean_messages = prune_conversation_history(messages, max_history=10, max_assistant_chars=3500)
     conversation = [{"role": "system", "content": dynamic_prompt}] + clean_messages
 
-    active_model = CANDIDATE_MODELS[0]
+    active_client = get_llm_client(base_url=base_url, api_key=api_key)
+    active_model = model or CANDIDATE_MODELS[0]
+    candidate_list = [active_model] if base_url else ([active_model] + [m for m in CANDIDATE_MODELS if m != active_model])
+    active_temp = temperature if temperature is not None else 0.1
+
     MAX_ROUNDS = 4
     has_streamed = False
 
@@ -368,14 +379,15 @@ async def process_dms_chat(messages: list[dict]) -> AsyncGenerator[str, None]:
         resp_msg = None
         last_error = None
 
-        for model_name in [active_model] + [m for m in CANDIDATE_MODELS if m != active_model]:
+        for model_name in candidate_list:
             try:
-                resp = await client.chat.completions.create(
+                resp = await active_client.chat.completions.create(
                     model=model_name,
                     messages=conversation,
                     tools=DMS_TOOLS,
                     tool_choice="auto",
-                    temperature=0.1,
+                    temperature=active_temp,
+                    max_tokens=max_tokens,
                 )
                 resp_msg = resp.choices[0].message
                 active_model = model_name
