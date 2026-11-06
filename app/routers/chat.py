@@ -28,6 +28,9 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    model: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -37,12 +40,14 @@ async def chat(request: ChatRequest):
     """
     Menerima conversation history dari frontend,
     menganalisis intent, query database, dan stream respons AI.
+    Mendukung dynamic model selection dari request frontend.
     """
     # Convert Pydantic models ke dict untuk agent
     messages_dict = [msg.model_dump() for msg in request.messages]
 
-    # Generate Hash Key unik dari pesan chat (Cache Key)
-    cache_key = "hris_chat:" + hashlib.md5(json.dumps(messages_dict, sort_keys=True).encode()).hexdigest()
+    # Generate Hash Key unik dari pesan chat + model (Cache Key)
+    req_sig = f"{request.model}_{request.temperature}_{json.dumps(messages_dict, sort_keys=True)}"
+    cache_key = "hris_chat:" + hashlib.md5(req_sig.encode()).hexdigest()
 
     async def generate():
         try:
@@ -54,7 +59,13 @@ async def chat(request: ChatRequest):
 
             full_response = ""
             async with async_session() as db:
-                async for chunk in process_hris_chat(messages_dict, db):
+                async for chunk in process_hris_chat(
+                    messages_dict,
+                    db,
+                    model=request.model,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                ):
                     full_response += chunk
                     yield chunk
                 

@@ -597,7 +597,13 @@ def prune_conversation_history(messages: list[dict], max_history: int = 10, max_
     return pruned
 
 
-async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGenerator[str, None]:
+async def process_hris_chat(
+    messages: list[dict],
+    db: AsyncSession,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> AsyncGenerator[str, None]:
     now_str = datetime.now().strftime("%d %B %Y (%H:%M WIB)")
     dynamic_prompt = (
         SYSTEM_PROMPT
@@ -631,7 +637,8 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
     has_tool_call = False
     response_message = None
     final_content = None
-    current_model = settings.llm_model
+    current_model = model or settings.llm_model
+    active_temp = temperature if temperature is not None else 0.7
 
     while turn < max_tool_turns:
         turn += 1
@@ -648,7 +655,7 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
                 response = await client.chat.completions.create(
                     model=current_model,
                     messages=conversation,
-                    temperature=0.7,
+                    temperature=active_temp,
                 )
             
             response_message = response.choices[0].message
@@ -853,7 +860,7 @@ async def process_hris_chat(messages: list[dict], db: AsyncSession) -> AsyncGene
                 "role": "user",
                 "content": "Berdasarkan seluruh data yang diperoleh di atas, tolong berikan rangkuman jawaban akhir yang ramah, rapi, dan lengkap dalam format Markdown untuk pengguna. Dilarang memanggil fungsi/tool lagi.",
             })
-            candidate_models = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", current_model, "openai/gpt-oss-120b"]
+            candidate_models = [current_model, "qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"]
             candidate_models = list(dict.fromkeys([m for m in candidate_models if m]))
             
             for m_candidate in candidate_models:
