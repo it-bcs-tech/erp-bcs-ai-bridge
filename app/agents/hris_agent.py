@@ -417,16 +417,17 @@ HRIS_TOOLS = [
         "function": {
             "name": "get_employee_full_profile",
             "description": (
-                "Dapatkan profil lengkap karyawan: status kerja, jabatan, divisi, departemen, lokasi kerja, tanggal bergabung, "
-                "masa kerja (tenure), masa berlaku kontrak, sisa saldo kuota cuti tahunan, dan kontak. "
-                "PERINGATAN: Tidak menyertakan nominal gaji/finansial demi kepatuhan privasi."
+                "Dapatkan biodata dan profil lengkap satu atau beberapa karyawan sekaligus: status kerja, jabatan, divisi, departemen, "
+                "lokasi kerja, tanggal bergabung, masa kerja (tenure), masa berlaku kontrak, sisa saldo kuota cuti tahunan, dan kontak. "
+                "EFISIENSI PENTING: Jika pengguna mencari info lebih dari satu orang (contoh: 'cari info nama adi fuadil dan m syamsul'), "
+                "MASUKKAN SEMUA NAMA SEKALIGUS ke parameter name_or_id (misal: 'adi fuadil dan m syamsul') dalam 1 kali pemanggilan fungsi."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name_or_id": {
                         "type": "string",
-                        "description": "Nama karyawan atau Payroll ID / NIK karyawan."
+                        "description": "Nama karyawan atau Payroll ID / NIK karyawan. BISA berisi beberapa nama sekaligus dipisahkan 'dan' atau koma (contoh: 'Adi Fuadil dan M Syamsul')."
                     }
                 },
                 "required": ["name_or_id"]
