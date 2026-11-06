@@ -14,7 +14,7 @@ import re
 from typing import Optional
 
 from app.config import get_settings
-from app.llm.llm_client import client
+from app.llm.llm_client import client, get_llm_client
 
 router = APIRouter()
 settings = get_settings()
@@ -32,9 +32,14 @@ async def scan_sim(
     file: Optional[UploadFile] = File(None),
     image_base64: Optional[str] = Form(None),
     mime_type: Optional[str] = Form("image/jpeg"),
+    model: Optional[str] = Form(None),
+    base_url: Optional[str] = Form(None),
+    api_key: Optional[str] = Form(None),
+    temperature: Optional[float] = Form(0.1),
 ):
     """
     Ekstrak data Surat Izin Mengemudi (SIM) atau e-KTP dari berkas gambar via Vision AI.
+    Mendukung dynamic LLM profile (endpoint kustom, API key, model terpilih dari Settings).
     Menolak secara tegas (Hard Reject) jika berkas bukan fisik SIM atau e-KTP yang sah.
     """
     base64_data = ""
@@ -56,6 +61,9 @@ async def scan_sim(
             base64_data = image_base64
     else:
         raise HTTPException(status_code=400, detail="File gambar SIM atau image_base64 wajib diunggah.")
+
+    # Inisialisasi client LLM aktif (kustom dari Settings atau fallback default)
+    active_client = get_llm_client(base_url=base_url, api_key=api_key)
 
     system_prompt = (
         "Anda adalah asisten AI Vision OCR resmi untuk verifikasi kartu identitas Republik Indonesia: "
@@ -99,14 +107,18 @@ async def scan_sim(
         "2. Jangan tambahkan markdown triple backtick. Berikan respons HANYA teks JSON valid."
     )
 
-    candidate_models = [
-        settings.llm_vision_model,
+    candidate_models = []
+    if model:
+        candidate_models.append(model)
+    if settings.llm_vision_model:
+        candidate_models.append(settings.llm_vision_model)
+    candidate_models.extend([
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "qwen/qwen3.8-27b",
         "meta-llama/llama-4-maverick-17b-128e-instruct",
         "llama-3.2-11b-vision-preview",
         settings.llm_model,
-    ]
+    ])
     # Filter duplikat dan None
     models_to_try = [m for i, m in enumerate(candidate_models) if m and m not in candidate_models[:i]]
 
@@ -115,7 +127,7 @@ async def scan_sim(
 
     for model_name in models_to_try:
         try:
-            response = await client.chat.completions.create(
+            response = await active_client.chat.completions.create(
                 model=model_name,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -132,7 +144,7 @@ async def scan_sim(
                         ],
                     },
                 ],
-                temperature=0.1,
+                temperature=temperature if temperature is not None else 0.1,
                 max_tokens=1000,
             )
 
